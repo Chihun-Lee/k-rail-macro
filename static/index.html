@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>K-Train Macro (SRT + KTX, 개인용)</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, "Apple SD Gothic Neo", system-ui, sans-serif;
+         max-width: 980px; margin: 0 auto; padding: 16px; }
+  h1 { margin: 0 0 4px; font-size: 20px; }
+  .warn { background: #fff5d6; border: 1px solid #e0c75a; padding: 8px 12px;
+          border-radius: 6px; font-size: 13px; margin: 8px 0 16px; }
+  .warn strong { color: #8a6d00; }
+  .tabs { display: flex; gap: 4px; border-bottom: 2px solid #ccc; margin: 12px 0 0; }
+  .tab-btn { background: #eee; border: 1px solid #ccc; border-bottom: none;
+             padding: 8px 20px; cursor: pointer; font-size: 15px; font-weight: bold;
+             border-radius: 6px 6px 0 0; }
+  .tab-btn.active { background: #fff; border-color: #888; border-bottom: 2px solid #fff;
+                    margin-bottom: -2px; color: #c00; }
+  .tab-srt .tab-btn[data-tab="srt"].active { color: #1e5edb; }
+  .tab-ktx .tab-btn[data-tab="ktx"].active { color: #117a3a; }
+  .tab-pane { display: none; padding-top: 8px; }
+  .tab-pane.active { display: block; }
+  fieldset { border: 1px solid #ccc; border-radius: 6px; margin: 12px 0; padding: 12px; }
+  legend { font-weight: bold; padding: 0 6px; }
+  label { display: inline-block; min-width: 110px; font-size: 13px; }
+  input, select, button { font-size: 14px; padding: 4px 8px; margin: 2px 0; }
+  input[type="text"], input[type="password"] { width: 200px; }
+  .row { margin: 4px 0; }
+  button { cursor: pointer; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { border: 1px solid #ddd; padding: 4px 6px; text-align: left; vertical-align: top; }
+  th { background: #f4f4f4; }
+  pre.log { background: #111; color: #cdf; padding: 8px; height: 200px; overflow: auto;
+            font-size: 11px; border-radius: 4px; white-space: pre-wrap; }
+  .status-polling { color: #2266cc; }
+  .status-reserved { color: #cc6600; font-weight: bold; }
+  .status-paid { color: #117a3a; font-weight: bold; }
+  .status-error { color: #b00020; }
+  .status-stopped { color: #666; }
+  .hidden { display: none; }
+  .compact { font-size: 12px; color: #666; }
+  .train-row { cursor: pointer; }
+  .train-row:hover { background: #eef; }
+  .card-section { border-top: 1px dashed #ccc; margin-top: 8px; padding-top: 8px; }
+  #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+           background: #222; color: #fff; padding: 10px 18px; border-radius: 6px;
+           font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s;
+           box-shadow: 0 4px 12px rgba(0,0,0,.25); z-index: 1000; }
+  #toast.show { opacity: 0.95; }
+</style>
+</head>
+<body>
+<div id="toast"></div>
+<h1>K-Train Macro <span class="compact">(개인용 — 본인 PC에서만 접속, 외부 노출 금지)</span></h1>
+<div class="warn">
+  ⚠ <strong>본인 SRT/코레일 계정·본인 카드로만 사용해야 합니다.</strong>
+  자격증명·카드정보는 본인 Mac의 <strong>macOS Keychain</strong>에만 암호화 저장됩니다.
+  서버는 <code>127.0.0.1:8912</code>에만 바인딩됩니다.
+</div>
+
+<div class="tabs">
+  <button class="tab-btn active" data-tab="srt">SRT</button>
+  <button class="tab-btn" data-tab="ktx">KTX (코레일)</button>
+</div>
+
+<!-- ─── SRT TAB ─── -->
+<div id="pane-srt" class="tab-pane active">
+  <fieldset>
+    <legend>① SRT 자격증명</legend>
+    <div id="srt-config-status" class="compact">상태 확인 중...</div>
+    <div id="srt-config-form" class="hidden">
+      <div class="row"><label>SRT 아이디</label><input id="srt-c-id" type="text" placeholder="회원번호 또는 이메일"></div>
+      <div class="row"><label>SRT 비밀번호</label><input id="srt-c-pw" type="password"></div>
+      <div class="card-section">
+        <div class="compact">SRT는 <strong>카드정보 필수</strong> (수동 모드도 결제 단계에서 사용).</div>
+        <div class="row"><label>카드번호</label><input id="srt-c-card-no" type="text" placeholder="16자리, 하이픈 제외"></div>
+        <div class="row"><label>카드비번 앞2자리</label><input id="srt-c-card-pw" type="password" maxlength="2"></div>
+        <div class="row"><label>생년월일/사업자</label><input id="srt-c-card-val" type="text" placeholder="YYMMDD 또는 사업자번호"></div>
+        <div class="row"><label>카드유효기간</label><input id="srt-c-card-exp" type="text" placeholder="YYMM" maxlength="4"></div>
+        <div class="row"><label>카드타입</label>
+          <select id="srt-c-card-type"><option value="J">개인 (J)</option><option value="S">법인 (S)</option></select></div>
+        <div class="row"><label>할부</label>
+          <select id="srt-c-card-inst">
+            <option value="0">일시불</option><option value="2">2개월</option><option value="3">3개월</option>
+            <option value="6">6개월</option><option value="12">12개월</option>
+          </select></div>
+      </div>
+      <div class="row"><button id="srt-btn-save-config">저장</button></div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>② 열차 조회</legend>
+    <div class="row">
+      <label>출발역</label><input id="srt-s-dep" type="text" value="수서">
+      <label>도착역</label><input id="srt-s-arr" type="text" value="오송">
+    </div>
+    <div class="row">
+      <label>날짜 (YYYYMMDD)</label><input id="srt-s-date" type="text" placeholder="20260509">
+      <label>시각 (HHMMSS)</label><input id="srt-s-time" type="text" value="080000">
+    </div>
+    <div class="row"><button id="srt-btn-search">조회</button>
+      <span class="compact">행 클릭 → ③번 폼 자동 채움</span></div>
+    <table id="srt-search-table" class="hidden">
+      <thead><tr><th>열차번호</th><th>구간/시간</th><th>일반실</th><th>특실</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </fieldset>
+
+  <fieldset>
+    <legend>③ SRT 매크로 작업 시작</legend>
+    <div class="row">
+      <label>출발역</label><input id="srt-j-dep" type="text" value="수서">
+      <label>도착역</label><input id="srt-j-arr" type="text" value="오송">
+    </div>
+    <div class="row">
+      <label>날짜</label><input id="srt-j-date" type="text" placeholder="20260509">
+      <label>시각</label><input id="srt-j-time" type="text" value="080000">
+    </div>
+    <div class="row">
+      <label>특정 열차번호</label><input id="srt-j-train" type="text" placeholder="비우면 시각 이후 첫 열차">
+      <label>인원</label><input id="srt-j-pax" type="number" value="1" min="1" max="9" style="width:60px">
+    </div>
+    <div class="row">
+      <label>좌석 선호</label>
+      <select id="srt-j-seat"><option value="any">아무거나</option><option value="general" selected>일반실</option><option value="special">특실</option></select>
+      <label>결제 모드</label>
+      <select id="srt-j-pay"><option value="manual" selected>수동</option><option value="auto">자동</option></select>
+    </div>
+    <div class="row compact">조회 패턴: 1~30초 랜덤 sleep, NetFunnel 자동 회복</div>
+    <div class="row"><button id="srt-btn-create-job">시작</button></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>④ SRT 작업 상태</legend>
+    <div id="srt-jobs-area"></div>
+  </fieldset>
+</div>
+
+<!-- ─── KTX TAB ─── -->
+<div id="pane-ktx" class="tab-pane">
+  <fieldset>
+    <legend>① KTX 자격증명</legend>
+    <div id="ktx-config-status" class="compact">상태 확인 중...</div>
+    <div id="ktx-config-form" class="hidden">
+      <div class="row"><label>코레일 아이디</label><input id="ktx-c-id" type="text" placeholder="멤버십번호/이메일/전화번호"></div>
+      <div class="row"><label>코레일 비밀번호</label><input id="ktx-c-pw" type="password"></div>
+      <div class="card-section">
+        <div class="compact">카드정보는 <strong>자동 결제 모드를 쓸 때만</strong> 필요. 비우면 수동 모드만 가능.</div>
+        <div class="row"><label>카드번호</label><input id="ktx-c-card-no" type="text" placeholder="16자리"></div>
+        <div class="row"><label>카드비번 앞2자리</label><input id="ktx-c-card-pw" type="password" maxlength="2"></div>
+        <div class="row"><label>생년월일</label><input id="ktx-c-card-val" type="text" placeholder="YYMMDD" maxlength="6"></div>
+        <div class="row"><label>카드유효기간</label><input id="ktx-c-card-exp" type="text" placeholder="YYMM" maxlength="4"></div>
+        <div class="row"><label>할부</label>
+          <select id="ktx-c-card-inst">
+            <option value="0">일시불</option><option value="2">2개월</option><option value="3">3개월</option>
+            <option value="6">6개월</option><option value="12">12개월</option>
+          </select></div>
+      </div>
+      <div class="row"><button id="ktx-btn-save-config">저장</button></div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>② 열차 조회</legend>
+    <div class="row">
+      <label>출발역</label><input id="ktx-s-dep" type="text" value="서울">
+      <label>도착역</label><input id="ktx-s-arr" type="text" value="부산">
+    </div>
+    <div class="row">
+      <label>날짜</label><input id="ktx-s-date" type="text" placeholder="20260510">
+      <label>시각</label><input id="ktx-s-time" type="text" value="090000">
+    </div>
+    <div class="row">
+      <label>열차종류</label>
+      <select id="ktx-s-type">
+        <option value="ktx" selected>KTX</option>
+        <option value="itx-saemaeul">ITX-새마을</option>
+        <option value="mugunghwa">무궁화호</option>
+        <option value="nuriro">누리로</option>
+        <option value="itx-cheongchun">ITX-청춘</option>
+        <option value="all">전체</option>
+      </select>
+      <button id="ktx-btn-search">조회</button>
+    </div>
+    <table id="ktx-search-table" class="hidden">
+      <thead><tr><th>열차번호</th><th>구간/시간</th><th>일반실</th><th>특실</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </fieldset>
+
+  <fieldset>
+    <legend>③ KTX 매크로 작업 시작</legend>
+    <div class="row">
+      <label>출발역</label><input id="ktx-j-dep" type="text" value="서울">
+      <label>도착역</label><input id="ktx-j-arr" type="text" value="부산">
+    </div>
+    <div class="row">
+      <label>날짜</label><input id="ktx-j-date" type="text" placeholder="20260510">
+      <label>시각</label><input id="ktx-j-time" type="text" value="090000">
+    </div>
+    <div class="row">
+      <label>열차종류</label>
+      <select id="ktx-j-type">
+        <option value="ktx" selected>KTX</option>
+        <option value="itx-saemaeul">ITX-새마을</option>
+        <option value="mugunghwa">무궁화호</option>
+        <option value="nuriro">누리로</option>
+        <option value="itx-cheongchun">ITX-청춘</option>
+        <option value="all">전체</option>
+      </select>
+      <label>인원</label><input id="ktx-j-pax" type="number" value="1" min="1" max="9" style="width:60px">
+    </div>
+    <div class="row">
+      <label>좌석 선호</label>
+      <select id="ktx-j-seat"><option value="any">아무거나</option><option value="general" selected>일반실</option><option value="special">특실</option></select>
+      <label>결제 모드</label>
+      <select id="ktx-j-pay"><option value="manual" selected>수동</option><option value="auto">자동</option></select>
+    </div>
+    <div class="row compact">
+      <label>특정 열차</label><span id="ktx-j-train-label">(미지정)</span>
+      <input id="ktx-j-train-id" type="hidden">
+      <button id="ktx-btn-clear-train" style="font-size:11px; padding:2px 6px">해제</button>
+    </div>
+    <div class="row compact">조회 패턴: 1~30초 랜덤 sleep, MACRO ERROR 자동 회복</div>
+    <div class="row"><button id="ktx-btn-create-job">시작</button></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>④ KTX 작업 상태</legend>
+    <div id="ktx-jobs-area"></div>
+  </fieldset>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+let _toastTimer = null;
+function toast(msg, ms = 1800) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.classList.add("show");
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.remove("show"), ms);
+}
+
+async function api(method, path, body) {
+  const opt = { method, headers: { "Content-Type": "application/json" } };
+  if (body !== undefined) opt.body = JSON.stringify(body);
+  const r = await fetch(path, opt);
+  if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+  return r.json();
+}
+
+// ─── tab switching ────────────────────────────────────────────────────
+document.querySelectorAll(".tab-btn").forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll(".tab-btn").forEach(x => x.classList.remove("active"));
+    document.querySelectorAll(".tab-pane").forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
+    $("pane-" + b.dataset.tab).classList.add("active");
+  };
+});
+
+// ─── shared service controller ────────────────────────────────────────
+function makeService(opts) {
+  // opts: { svc:"srt"|"ktx", prefix:"/api/srt", title, idLabel, hasAlwaysCard }
+  const { svc, prefix, idLabel, hasAlwaysCard } = opts;
+  const p = (suffix) => svc + suffix;
+  const logState = {};
+
+  async function refreshConfig() {
+    const s = await api("GET", prefix + "/config/status");
+    if (s.configured) {
+      const cardLine = (hasAlwaysCard || s.has_card)
+        ? `카드: <code>${s.card_masked || ("****" + s.card_last4)}</code> (할부 ${s.card_installment})`
+        : `<span style="color:#888">카드 미저장 (수동 모드만 가능)</span>`;
+      $(p("-config-status")).innerHTML =
+        `✔ 저장됨 — ${idLabel}: <code>${s.id}</code><br>${cardLine}
+         <button id="${p('-btn-edit-config')}" style="margin-left:8px">수정</button>`;
+      $(p("-config-form")).classList.add("hidden");
+      $(p("-btn-edit-config")).onclick = () => $(p("-config-form")).classList.remove("hidden");
+    } else {
+      $(p("-config-status")).innerHTML = "⚠ 자격증명이 저장되어 있지 않습니다. 아래 폼 작성.";
+      $(p("-config-form")).classList.remove("hidden");
+    }
+  }
+
+  $(p("-btn-save-config")).onclick = async () => {
+    try {
+      const body = svc === "srt" ? {
+        srt_id: $("srt-c-id").value.trim(),
+        srt_password: $("srt-c-pw").value,
+        card_number: $("srt-c-card-no").value.trim(),
+        card_password: $("srt-c-card-pw").value,
+        card_validation: $("srt-c-card-val").value.trim(),
+        card_expire: $("srt-c-card-exp").value.trim(),
+        card_type: $("srt-c-card-type").value,
+        card_installment: parseInt($("srt-c-card-inst").value, 10),
+      } : {
+        ktx_id: $("ktx-c-id").value.trim(),
+        ktx_password: $("ktx-c-pw").value,
+        card_number: $("ktx-c-card-no").value.trim(),
+        card_password: $("ktx-c-card-pw").value,
+        card_validation: $("ktx-c-card-val").value.trim(),
+        card_expire: $("ktx-c-card-exp").value.trim(),
+        card_installment: parseInt($("ktx-c-card-inst").value, 10),
+      };
+      await api("POST", prefix + "/config", body);
+      const fields = svc === "srt"
+        ? ["srt-c-pw","srt-c-card-no","srt-c-card-pw","srt-c-card-val","srt-c-card-exp"]
+        : ["ktx-c-pw","ktx-c-card-no","ktx-c-card-pw","ktx-c-card-val","ktx-c-card-exp"];
+      fields.forEach(i => $(i).value = "");
+      await refreshConfig();
+      toast(`✓ ${svc.toUpperCase()} 자격증명 저장됨`);
+    } catch (e) { alert("저장 실패: " + e.message); }
+  };
+
+  $(p("-btn-search")).onclick = async () => {
+    $(p("-btn-search")).disabled = true;
+    try {
+      const body = { dep: $(p("-s-dep")).value, arr: $(p("-s-arr")).value,
+                     date: $(p("-s-date")).value, time: $(p("-s-time")).value };
+      if (svc === "ktx") body.train_type = $("ktx-s-type").value;
+      const r = await api("POST", prefix + "/search", body);
+      const tbody = $(p("-search-table")).querySelector("tbody");
+      tbody.innerHTML = "";
+      if (r.trains.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#888">결과 없음</td></tr>`;
+      }
+      for (const t of r.trains) {
+        const tr = document.createElement("tr");
+        tr.className = "train-row";
+        const trainNo = t.train_number || t.train_no;
+        tr.innerHTML = `<td>${trainNo}</td><td>${t.label}</td>
+          <td>${t.general ? "✔" : "매진"}</td><td>${t.special ? "✔" : "매진"}</td>`;
+        tr.onclick = () => {
+          $(p("-j-dep")).value = $(p("-s-dep")).value;
+          $(p("-j-arr")).value = $(p("-s-arr")).value;
+          $(p("-j-date")).value = $(p("-s-date")).value;
+          $(p("-j-time")).value = $(p("-s-time")).value;
+          if (svc === "srt") {
+            $("srt-j-train").value = trainNo;
+          } else {
+            $("ktx-j-type").value = $("ktx-s-type").value;
+            $("ktx-j-train-id").value = t.train_id;
+            $("ktx-j-train-label").textContent = `${trainNo} (${t.label.slice(0, 40)}...)`;
+          }
+          toast(`✓ ${trainNo} 적용됨 (③번 폼)`);
+        };
+        tbody.appendChild(tr);
+      }
+      $(p("-search-table")).classList.remove("hidden");
+    } catch (e) { alert("조회 실패: " + e.message); }
+    $(p("-btn-search")).disabled = false;
+  };
+
+  if (svc === "ktx") {
+    $("ktx-btn-clear-train").onclick = () => {
+      $("ktx-j-train-id").value = "";
+      $("ktx-j-train-label").textContent = "(미지정)";
+    };
+  }
+
+  $(p("-btn-create-job")).onclick = async () => {
+    try {
+      const body = svc === "srt" ? {
+        dep: $("srt-j-dep").value, arr: $("srt-j-arr").value,
+        date: $("srt-j-date").value, time: $("srt-j-time").value,
+        train_number: $("srt-j-train").value || null,
+        passengers: parseInt($("srt-j-pax").value, 10),
+        seat_pref: $("srt-j-seat").value, pay_mode: $("srt-j-pay").value,
+      } : {
+        dep: $("ktx-j-dep").value, arr: $("ktx-j-arr").value,
+        date: $("ktx-j-date").value, time: $("ktx-j-time").value,
+        train_id: $("ktx-j-train-id").value || null,
+        train_type: $("ktx-j-type").value,
+        passengers: parseInt($("ktx-j-pax").value, 10),
+        seat_pref: $("ktx-j-seat").value, pay_mode: $("ktx-j-pay").value,
+      };
+      const j = await api("POST", prefix + "/jobs", body);
+      const trainStr = j.spec.train_number || j.spec.train_id || "(첫차)";
+      toast(`✓ ${j.id} 생성됨 (${j.spec.dep}→${j.spec.arr} ${trainStr})`, 2400);
+      refreshJobs();
+    } catch (e) { alert("생성 실패: " + e.message); }
+  };
+
+  async function refreshJobs() {
+    const r = await api("GET", prefix + "/jobs");
+    const area = $(p("-jobs-area"));
+    if (r.jobs.length === 0) {
+      area.innerHTML = "<p class='compact'>실행 중인 작업이 없습니다.</p>";
+      return;
+    }
+    for (const j of r.jobs) {
+      let card = document.getElementById(p("-job-") + j.id);
+      if (!card) {
+        card = document.createElement("div");
+        card.id = p("-job-") + j.id;
+        card.style.border = "1px solid #ccc";
+        card.style.borderRadius = "6px";
+        card.style.padding = "8px";
+        card.style.margin = "8px 0";
+        card.innerHTML = `
+          <div class="job-header"></div>
+          <pre class="log" id="${p('-log-') + j.id}"></pre>
+          <button data-stop="${j.id}">중지</button>
+          <button data-pay="${j.id}" class="hidden">결제 진행</button>`;
+        area.appendChild(card);
+        card.querySelector(`[data-stop="${j.id}"]`).onclick = async () => {
+          if (confirm("작업을 중지할까요?")) {
+            await api("DELETE", prefix + "/jobs/" + j.id);
+            refreshJobs();
+          }
+        };
+        card.querySelector(`[data-pay="${j.id}"]`).onclick = async () => {
+          if (confirm("카드로 결제를 진행할까요? 되돌릴 수 없습니다.")) {
+            try { await api("POST", prefix + "/jobs/" + j.id + "/pay"); } catch (e) { alert(e.message); }
+          }
+        };
+      }
+      const spec = j.spec;
+      const trainInfo = svc === "srt"
+        ? (spec.train_number || "(첫차)")
+        : `${spec.train_type.toUpperCase()} ${spec.train_id ? "(특정)" : "(첫차)"}`;
+      card.querySelector(".job-header").innerHTML =
+        `<b>${j.id}</b> · <span class="status-${j.status}">${j.status}</span>
+         · ${spec.dep}→${spec.arr} ${spec.date} ${spec.time}
+         · ${trainInfo}
+         · 좌석 ${spec.seat_pref}, 결제 ${spec.pay_mode}, 시도 ${j.attempts}
+         ${j.reservation ? `<br>📋 ${j.reservation}` : ""}
+         ${j.payment_deadline ? `<br>⏰ 결제기한: ${j.payment_deadline}` : ""}
+         ${j.error ? `<br><span class="status-error">${j.error}</span>` : ""}`;
+      card.querySelector(`[data-pay="${j.id}"]`).classList.toggle(
+        "hidden", !(j.status === "reserved" && spec.pay_mode === "manual"));
+
+      const since = logState[j.id] || 0;
+      const lr = await api("GET", `${prefix}/jobs/${j.id}/log?since=${since}`);
+      const pre = $(p("-log-") + j.id);
+      for (const line of lr.lines) pre.textContent += line + "\n";
+      pre.scrollTop = pre.scrollHeight;
+      logState[j.id] = lr.next;
+    }
+  }
+
+  refreshConfig();
+  refreshJobs();
+  setInterval(refreshJobs, 2000);
+}
+
+// init both services
+makeService({ svc: "srt", prefix: "/api/srt", idLabel: "SRT ID", hasAlwaysCard: true });
+makeService({ svc: "ktx", prefix: "/api/ktx", idLabel: "KTX ID", hasAlwaysCard: false });
+</script>
+</body>
+</html>
