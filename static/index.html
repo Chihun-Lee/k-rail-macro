@@ -296,11 +296,15 @@ function makeService(opts) {
       const cardLine = (hasAlwaysCard || s.has_card)
         ? `카드: <code>${s.card_masked || ("****" + s.card_last4)}</code> (할부 ${s.card_installment})`
         : `<span style="color:#888">카드 미저장 (수동 모드만 가능)</span>`;
+      const cardTestBtn = (hasAlwaysCard || s.has_card)
+        ? `<button id="${p('-btn-test-card')}" style="margin-left:4px">카드 테스트</button>`
+        : "";
       $(p("-config-status")).innerHTML =
         `✔ 저장됨 — ${idLabel}: <code>${s.id}</code><br>${cardLine}
          <button id="${p('-btn-edit-config')}" style="margin-left:8px">수정</button>
          <button id="${p('-btn-test-login')}" style="margin-left:4px">로그인 테스트</button>
-         <span id="${p('-login-result')}" style="margin-left:6px"></span>`;
+         ${cardTestBtn}
+         <span id="${p('-login-result')}" style="margin-left:6px; display:block; margin-top:4px"></span>`;
       $(p("-config-form")).classList.add("hidden");
       $(p("-btn-edit-config")).onclick = async () => {
         await prefillEditForm();
@@ -319,6 +323,32 @@ function makeService(opts) {
           }
         } catch (e) { r.innerHTML = `<span style="color:#b00020">✗ ${e.message}</span>`; }
       };
+      const cardBtn = $(p("-btn-test-card"));
+      if (cardBtn) {
+        const route = svc === "srt" ? "김천(구미) → 동대구" : "서울 → 광명";
+        cardBtn.onclick = async () => {
+          const msg =
+            `⚠ 카드 테스트 안내\n\n` +
+            `${route} 25일 뒤 평일 05:30 이후 첫차를 실제로:\n` +
+            `  ① 예약\n  ② 카드로 결제\n  ③ 즉시 자동 취소\n\n` +
+            `목적: 저장된 카드가 실제로 결제 가능한지 확인.\n\n` +
+            `※ 출발 1일 이전 취소 수수료 약 400원이 발생할 수 있습니다.\n` +
+            `※ 카드 한도가 잠시 차감되었다 복원됩니다.\n\n` +
+            `진행할까요?`;
+          if (!confirm(msg)) return;
+          const r = $(p("-login-result"));
+          r.innerHTML = "<span style='color:#888'>카드 테스트 중... (~10초)</span>";
+          try {
+            const t = await api("POST", prefix + "/config/card-test");
+            const stepsHtml = t.steps.map(s =>
+              `<div style="font-size:11px; padding-left:12px; color:${s.ok ? '#117a3a' : '#b00020'}">
+                 ${s.ok ? '✓' : '✗'} ${s.name}${s.detail ? ' — ' + s.detail : ''}
+               </div>`).join("");
+            const color = t.ok ? "#117a3a" : "#b00020";
+            r.innerHTML = `<span style="color:${color}">${t.summary}</span>${stepsHtml}`;
+          } catch (e) { r.innerHTML = `<span style="color:#b00020">✗ ${e.message}</span>`; }
+        };
+      }
     } else {
       $(p("-config-status")).innerHTML = "⚠ 자격증명이 저장되어 있지 않습니다. 아래 폼 작성.";
       $(p("-config-form")).classList.remove("hidden");

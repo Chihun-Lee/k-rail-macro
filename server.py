@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
+import card_test
 import config
 import srt_worker
 import ktx_worker
@@ -130,6 +131,17 @@ def srt_config_test():
         raise HTTPException(status_code=404, detail="not configured")
     ok, err = _srt_login_test(c)
     return {"login_ok": ok, "login_error": err}
+
+
+@srt_router.post("/config/card-test")
+def srt_card_test():
+    c = config.srt.load()
+    if not c:
+        raise HTTPException(status_code=404, detail="not configured")
+    if not c.card_number:
+        raise HTTPException(status_code=400, detail="카드 정보가 없습니다")
+    r = card_test.srt_card_test()
+    return {"ok": r.ok, "summary": r.summary, "steps": r.steps}
 
 
 @srt_router.post("/search")
@@ -300,6 +312,17 @@ def ktx_config_test():
         raise HTTPException(status_code=404, detail="not configured")
     ok, err, name = _ktx_login_test(c)
     return {"login_ok": ok, "login_error": err, "login_name": name}
+
+
+@ktx_router.post("/config/card-test")
+def ktx_card_test():
+    c = config.ktx.load()
+    if not c:
+        raise HTTPException(status_code=404, detail="not configured")
+    if not c.card_number:
+        raise HTTPException(status_code=400, detail="카드 정보가 없습니다")
+    r = card_test.ktx_card_test()
+    return {"ok": r.ok, "summary": r.summary, "steps": r.steps}
 
 
 @ktx_router.post("/search")
