@@ -88,13 +88,48 @@ def srt_config_save(body: SRTCredsIn):
         msgs = [f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors()]
         raise HTTPException(status_code=422, detail="; ".join(msgs))
     config.srt.save(creds)
-    return config.srt.public_status()
+    out = config.srt.public_status()
+    out["login_ok"], out["login_error"] = _srt_login_test(creds)
+    return out
 
 
 @srt_router.delete("/config")
 def srt_config_delete():
     config.srt.clear()
     return {"ok": True}
+
+
+@srt_router.get("/config/edit")
+def srt_config_edit():
+    c = config.srt.load()
+    if not c:
+        raise HTTPException(status_code=404, detail="not configured")
+    return {
+        "srt_id": c.srt_id,
+        "card_number": c.card_number,
+        "card_validation": c.card_validation,
+        "card_expire": c.card_expire,
+        "card_type": c.card_type,
+        "card_installment": c.card_installment,
+    }
+
+
+def _srt_login_test(creds: config.SRTCredentials) -> tuple[bool, Optional[str]]:
+    from SRT import SRT
+    try:
+        SRT(creds.srt_id, creds.srt_password)
+        return True, None
+    except Exception as e:
+        return False, str(e)[:200]
+
+
+@srt_router.post("/config/test")
+def srt_config_test():
+    c = config.srt.load()
+    if not c:
+        raise HTTPException(status_code=404, detail="not configured")
+    ok, err = _srt_login_test(c)
+    return {"login_ok": ok, "login_error": err}
 
 
 @srt_router.post("/search")
@@ -222,13 +257,49 @@ def ktx_config_save(body: KTXCredsIn):
         msgs = [f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors()]
         raise HTTPException(status_code=422, detail="; ".join(msgs))
     config.ktx.save(creds)
-    return config.ktx.public_status()
+    out = config.ktx.public_status()
+    out["login_ok"], out["login_error"], out["login_name"] = _ktx_login_test(creds)
+    return out
 
 
 @ktx_router.delete("/config")
 def ktx_config_delete():
     config.ktx.clear()
     return {"ok": True}
+
+
+@ktx_router.get("/config/edit")
+def ktx_config_edit():
+    c = config.ktx.load()
+    if not c:
+        raise HTTPException(status_code=404, detail="not configured")
+    return {
+        "ktx_id": c.ktx_id,
+        "card_number": c.card_number,
+        "card_validation": c.card_validation,
+        "card_expire": c.card_expire,
+        "card_installment": c.card_installment,
+    }
+
+
+def _ktx_login_test(creds: config.KTXCredentials) -> tuple[bool, Optional[str], Optional[str]]:
+    from ktx_korail import PatchedKorail
+    try:
+        c = PatchedKorail(creds.ktx_id, creds.ktx_password, auto_login=False)
+        if c.login():
+            return True, None, getattr(c, "name", None)
+        return False, "login returned False (잘못된 아이디/비밀번호)", None
+    except Exception as e:
+        return False, str(e)[:200], None
+
+
+@ktx_router.post("/config/test")
+def ktx_config_test():
+    c = config.ktx.load()
+    if not c:
+        raise HTTPException(status_code=404, detail="not configured")
+    ok, err, name = _ktx_login_test(c)
+    return {"login_ok": ok, "login_error": err, "login_name": name}
 
 
 @ktx_router.post("/search")

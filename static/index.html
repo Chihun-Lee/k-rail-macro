@@ -270,6 +270,26 @@ function makeService(opts) {
   const p = (suffix) => svc + suffix;
   const logState = {};
 
+  async function prefillEditForm() {
+    try {
+      const d = await api("GET", prefix + "/config/edit");
+      if (svc === "srt") {
+        $("srt-c-id").value = d.srt_id || "";
+        $("srt-c-card-no").value = d.card_number || "";
+        $("srt-c-card-val").value = d.card_validation || "";
+        $("srt-c-card-exp").value = d.card_expire || "";
+        if (d.card_type) $("srt-c-card-type").value = d.card_type;
+        $("srt-c-card-inst").value = String(d.card_installment ?? 0);
+      } else {
+        $("ktx-c-id").value = d.ktx_id || "";
+        $("ktx-c-card-no").value = d.card_number || "";
+        $("ktx-c-card-val").value = d.card_validation || "";
+        $("ktx-c-card-exp").value = d.card_expire || "";
+        $("ktx-c-card-inst").value = String(d.card_installment ?? 0);
+      }
+    } catch (e) {/* ignore */}
+  }
+
   async function refreshConfig() {
     const s = await api("GET", prefix + "/config/status");
     if (s.configured) {
@@ -278,9 +298,27 @@ function makeService(opts) {
         : `<span style="color:#888">카드 미저장 (수동 모드만 가능)</span>`;
       $(p("-config-status")).innerHTML =
         `✔ 저장됨 — ${idLabel}: <code>${s.id}</code><br>${cardLine}
-         <button id="${p('-btn-edit-config')}" style="margin-left:8px">수정</button>`;
+         <button id="${p('-btn-edit-config')}" style="margin-left:8px">수정</button>
+         <button id="${p('-btn-test-login')}" style="margin-left:4px">로그인 테스트</button>
+         <span id="${p('-login-result')}" style="margin-left:6px"></span>`;
       $(p("-config-form")).classList.add("hidden");
-      $(p("-btn-edit-config")).onclick = () => $(p("-config-form")).classList.remove("hidden");
+      $(p("-btn-edit-config")).onclick = async () => {
+        await prefillEditForm();
+        $(p("-config-form")).classList.remove("hidden");
+        toast("✓ 저장된 정보 불러옴 (비밀번호 2개는 다시 입력 필요)");
+      };
+      $(p("-btn-test-login")).onclick = async () => {
+        const r = $(p("-login-result"));
+        r.innerHTML = "<span style='color:#888'>테스트 중...</span>";
+        try {
+          const t = await api("POST", prefix + "/config/test");
+          if (t.login_ok) {
+            r.innerHTML = `<span style="color:#117a3a">✓ 로그인 성공${t.login_name ? " — " + t.login_name : ""}</span>`;
+          } else {
+            r.innerHTML = `<span style="color:#b00020">✗ 로그인 실패: ${t.login_error || "알 수 없음"}</span>`;
+          }
+        } catch (e) { r.innerHTML = `<span style="color:#b00020">✗ ${e.message}</span>`; }
+      };
     } else {
       $(p("-config-status")).innerHTML = "⚠ 자격증명이 저장되어 있지 않습니다. 아래 폼 작성.";
       $(p("-config-form")).classList.remove("hidden");
@@ -307,13 +345,19 @@ function makeService(opts) {
         card_expire: $("ktx-c-card-exp").value.trim(),
         card_installment: parseInt($("ktx-c-card-inst").value, 10),
       };
-      await api("POST", prefix + "/config", body);
+      const r = await api("POST", prefix + "/config", body);
       const fields = svc === "srt"
-        ? ["srt-c-pw","srt-c-card-no","srt-c-card-pw","srt-c-card-val","srt-c-card-exp"]
-        : ["ktx-c-pw","ktx-c-card-no","ktx-c-card-pw","ktx-c-card-val","ktx-c-card-exp"];
+        ? ["srt-c-pw","srt-c-card-pw"]
+        : ["ktx-c-pw","ktx-c-card-pw"];
       fields.forEach(i => $(i).value = "");
       await refreshConfig();
-      toast(`✓ ${svc.toUpperCase()} 자격증명 저장됨`);
+      if (r.login_ok) {
+        toast(`✓ 저장 + 로그인 성공${r.login_name ? " (" + r.login_name + ")" : ""}`, 2400);
+      } else if (r.login_ok === false) {
+        toast(`⚠ 저장됨, 그러나 로그인 실패: ${r.login_error || ""}`, 4000);
+      } else {
+        toast(`✓ ${svc.toUpperCase()} 자격증명 저장됨`);
+      }
     } catch (e) { alert("저장 실패: " + e.message); }
   };
 
