@@ -151,9 +151,21 @@ def srt_search(body: SRTSearchIn):
     try:
         return {"trains": srt_worker.search_preview(body.dep, body.arr, body.date, body.time)}
     except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=_safe_err(e))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"SRT 조회 실패: {e}")
+        raise HTTPException(status_code=502, detail=f"SRT 조회 실패: {_safe_err(e)}")
+
+
+def _safe_err(e: Exception) -> str:
+    """Some exception classes (e.g. requests.ConnectTimeout) have buggy
+    __str__ that raises TypeError. Use repr as a guaranteed string."""
+    try:
+        s = str(e)
+        if not isinstance(s, str):
+            raise TypeError
+        return s or f"{type(e).__name__}"
+    except Exception:
+        return f"{type(e).__name__}: {e!r}"
 
 
 def _srt_to_dict(j: srt_worker.Job) -> dict:
@@ -332,9 +344,9 @@ def ktx_search(body: KTXSearchIn):
     try:
         return {"trains": ktx_worker.search_preview(body.dep, body.arr, body.date, body.time, body.train_type)}
     except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=_safe_err(e))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"KTX 조회 실패: {e}")
+        raise HTTPException(status_code=502, detail=f"KTX 조회 실패: {_safe_err(e)}")
 
 
 def _ktx_to_dict(j: ktx_worker.Job) -> dict:

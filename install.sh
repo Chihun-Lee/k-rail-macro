@@ -17,21 +17,20 @@ echo "  K-Train 매크로 (SRT + KTX) 설치"
 echo "════════════════════════════════════════"
 echo ""
 
-echo "[1/5] Python 3.10+ 확인..."
-# 가능한 후보를 순서대로 시도 — 3.13 → 3.10
+echo "[1/5] Python 3.10+ 확인 (ensurepip 포함)..."
+# Apple stub Python 은 ensurepip 빠져있어 venv 안에 pip 가 안 깔림 →
+# ensurepip 모듈 import 가능한 인터프리터만 인정.
+_check_py() {
+  "$1" -c 'import sys, ensurepip; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null
+}
 PYTHON_BIN=""
 for cand in python3.13 python3.12 python3.11 python3.10; do
-  if command -v "$cand" >/dev/null 2>&1; then
-    PYTHON_BIN="$(command -v "$cand")"
-    break
+  if command -v "$cand" >/dev/null 2>&1 && _check_py "$cand"; then
+    PYTHON_BIN="$(command -v "$cand")"; break
   fi
 done
-
-# 아무것도 없으면 기본 python3 가 3.10+ 인지 검사
-if [ -z "$PYTHON_BIN" ] && command -v python3 >/dev/null 2>&1; then
-  if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)'; then
-    PYTHON_BIN="$(command -v python3)"
-  fi
+if [ -z "$PYTHON_BIN" ] && command -v python3 >/dev/null 2>&1 && _check_py python3; then
+  PYTHON_BIN="$(command -v python3)"
 fi
 
 # 그래도 없으면 Python.org 공식 .pkg로 자동 설치 (Homebrew 안 거침)
@@ -94,18 +93,32 @@ fi
 echo "  ✓ $INSTALL_DIR"
 
 echo "[3/5] Python 환경 구성 (1~3분 소요)..."
-# venv가 이미 있고 python 버전이 너무 낮으면 재생성
+# venv 가 너무 낮은 파이썬으로 만들어졌거나 pip 가 빠져있으면 재생성
 if [ -x "$INSTALL_DIR/venv/bin/python" ]; then
-  if ! "$INSTALL_DIR/venv/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)'; then
-    echo "  → 기존 venv 가 3.10 미만 → 재생성"
+  if ! "$INSTALL_DIR/venv/bin/python" -c 'import sys, pip; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+    echo "  → 기존 venv 가 3.10 미만 또는 pip 없음 → 재생성"
     rm -rf "$INSTALL_DIR/venv"
   fi
 fi
 if [ ! -x "$INSTALL_DIR/venv/bin/python" ]; then
   "$PYTHON_BIN" -m venv "$INSTALL_DIR/venv"
 fi
-"$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
-"$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
+# pip 부트스트랩 3단 fallback (ensurepip → get-pip.py)
+VENV_PY="$INSTALL_DIR/venv/bin/python"
+if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+  "$VENV_PY" -m ensurepip --upgrade 2>/dev/null || true
+  if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+    echo "  → pip 미설치 → get-pip.py 부트스트랩"
+    curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$VENV_PY"
+  fi
+fi
+if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+  echo "  ✗ pip 부트스트랩 실패. https://www.python.org/downloads/macos/ 에서 Python 재설치 후 다시 시도."
+  read -p "  엔터로 종료..."
+  exit 1
+fi
+"$VENV_PY" -m pip install --quiet --upgrade pip
+"$VENV_PY" -m pip install --quiet -r "$INSTALL_DIR/requirements.txt"
 echo "  ✓ 의존성 설치 완료"
 
 echo "[4/5] 앱 번들 생성..."
@@ -123,11 +136,16 @@ cat > "$RUN_APP/Contents/Info.plist" <<EOF
   <key>CFBundleVersion</key><string>1.0</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleExecutable</key><string>k-train-macro</string>
+  <key>CFBundleIconFile</key><string>icon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSUIElement</key><true/>
 </dict>
 </plist>
 EOF
+mkdir -p "$RUN_APP/Contents/Resources"
+if [ -f "$INSTALL_DIR/icon.png" ]; then
+  sips -s format icns "$INSTALL_DIR/icon.png" --out "$RUN_APP/Contents/Resources/icon.icns" >/dev/null 2>&1 || true
+fi
 
 cat > "$RUN_APP/Contents/MacOS/k-train-macro" <<EOF
 #!/bin/bash
