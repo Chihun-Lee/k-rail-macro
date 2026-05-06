@@ -112,25 +112,31 @@ if [ -x "$INSTALL_DIR/venv/bin/python" ] && ! _venv_ok; then
   echo "  → 기존 venv 가 3.10 미만 / pip 없음 / arch mismatch → 재생성"
   rm -rf "$INSTALL_DIR/venv"
 fi
+# Apple Silicon에서는 universal binary 가 x86_64 로 fork 될 수 있음 →
+# 모든 Python 호출을 arch -arm64 로 강제해서 native arm64 로 실행
+ARCH_PREFIX=""
+if [ "$SYS_ARCH" = "arm64" ]; then
+  ARCH_PREFIX="arch -arm64"
+fi
 if [ ! -x "$INSTALL_DIR/venv/bin/python" ]; then
-  "$PYTHON_BIN" -m venv "$INSTALL_DIR/venv"
+  $ARCH_PREFIX "$PYTHON_BIN" -m venv "$INSTALL_DIR/venv"
 fi
 # pip 부트스트랩 3단 fallback (ensurepip → get-pip.py)
 VENV_PY="$INSTALL_DIR/venv/bin/python"
-if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
-  "$VENV_PY" -m ensurepip --upgrade 2>/dev/null || true
-  if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+if ! $ARCH_PREFIX "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+  $ARCH_PREFIX "$VENV_PY" -m ensurepip --upgrade 2>/dev/null || true
+  if ! $ARCH_PREFIX "$VENV_PY" -m pip --version >/dev/null 2>&1; then
     echo "  → pip 미설치 → get-pip.py 부트스트랩"
-    curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$VENV_PY"
+    curl -fsSL https://bootstrap.pypa.io/get-pip.py | $ARCH_PREFIX "$VENV_PY"
   fi
 fi
-if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+if ! $ARCH_PREFIX "$VENV_PY" -m pip --version >/dev/null 2>&1; then
   echo "  ✗ pip 부트스트랩 실패. https://www.python.org/downloads/macos/ 에서 Python 재설치 후 다시 시도."
   read -p "  엔터로 종료..."
   exit 1
 fi
-"$VENV_PY" -m pip install --quiet --upgrade pip
-"$VENV_PY" -m pip install --quiet -r "$INSTALL_DIR/requirements.txt"
+$ARCH_PREFIX "$VENV_PY" -m pip install --quiet --upgrade pip
+$ARCH_PREFIX "$VENV_PY" -m pip install --quiet -r "$INSTALL_DIR/requirements.txt"
 echo "  ✓ 의존성 설치 완료"
 
 echo "[4/5] 앱 번들 생성..."
@@ -170,6 +176,7 @@ cat > "$RUN_APP/Contents/MacOS/k-train-macro" <<EOF
 INSTALL_DIR="$INSTALL_DIR"
 PORT=$PORT
 LOG="/tmp/k-train-macro.log"
+ARCH_PREFIX="$ARCH_PREFIX"
 
 EXISTING=\$(lsof -ti tcp:\$PORT -sTCP:LISTEN 2>/dev/null)
 if [ -n "\$EXISTING" ]; then
@@ -178,7 +185,7 @@ if [ -n "\$EXISTING" ]; then
 fi
 
 cd "\$INSTALL_DIR"
-nohup "\$INSTALL_DIR/venv/bin/python" server.py > "\$LOG" 2>&1 &
+nohup \$ARCH_PREFIX "\$INSTALL_DIR/venv/bin/python" server.py > "\$LOG" 2>&1 &
 
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   if curl -fsS http://127.0.0.1:\$PORT/api/srt/config/status > /dev/null 2>&1; then
