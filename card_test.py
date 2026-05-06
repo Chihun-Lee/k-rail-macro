@@ -19,6 +19,7 @@ Key protections (added after a refund-the-wrong-ticket incident):
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Optional
@@ -60,48 +61,73 @@ SRT_RESERVE_INFO_REFERER = (
 )
 
 
-def _srt_safe_refund(srt_session, pnr_no: str, expected_dep: str, expected_arr: str,
-                     expected_date: str) -> tuple[bool, str]:
-    """Refund a single PNR safely with route/date verification.
+def _srt_fetch_reserve_info(srt_session, pnr_no: str) -> tuple[Optional[dict], str]:
+    """Call SRT reserve_info with the PNR-scoped Referer.
 
-    Returns (ok, message).
+    Returns (row_dict, message). row_dict is None on failure.
     """
-    # 1) fetch reserve_info for THIS pnr only
     headers = {"Referer": SRT_RESERVE_INFO_REFERER + pnr_no}
     r = srt_session.post(SRT_RESERVE_INFO_URL, headers=headers)
     try:
         info = json.loads(r.text)
     except Exception:
-        return False, f"reserve_info: invalid JSON ({r.text[:80]})"
+        return None, f"invalid JSON ({r.text[:80]})"
     if info.get("ErrorCode") != "0":
-        return False, f"reserve_info error: {info.get('ErrorMsg')}"
+        return None, f"error: {info.get('ErrorMsg')}"
     rows = info.get("outDataSets", {}).get("dsOutput1") or []
     if not rows:
-        return False, "reserve_info: empty dsOutput1"
-    d = rows[0]
+        return None, "empty dsOutput1"
+    return rows[0], "ok"
 
-    # 2) verify route + date — protect against operating on wrong PNR
-    if d.get("pnrNo") != pnr_no:
-        return False, f"PNR mismatch: requested {pnr_no} got {d.get('pnrNo')}"
-    if d.get("dptRsStnCd") != SRT_TEST_DEP_CODE:
-        return False, f"dep mismatch: expected {SRT_TEST_DEP_CODE} got {d.get('dptRsStnCd')}"
-    if d.get("arvRsStnCd") != SRT_TEST_ARR_CODE:
-        return False, f"arr mismatch: expected {SRT_TEST_ARR_CODE} got {d.get('arvRsStnCd')}"
-    if d.get("dptDt") != expected_date:
-        return False, f"date mismatch: expected {expected_date} got {d.get('dptDt')}"
 
-    # 3) post refund with scoped data
+def _srt_verify_pnr_match(srt_session, pnr_no: str, expected_dep_code: str,
+                          expected_arr_code: str, expected_date: str,
+                          protected_pnrs: set[str],
+                          retries: list[int] = (5, 15, 30)) -> tuple[Optional[dict], str]:
+    """Try reserve_info with sleeps until the response PNR matches our pnr_no.
+
+    Stops immediately if the response PNR is in the protected set.
+    Returns (row_dict, message). None means failed all retries.
+    """
+    last_msg = "no attempts"
+    for i, sleep_sec in enumerate(retries, 1):
+        time.sleep(sleep_sec)
+        row, msg = _srt_fetch_reserve_info(srt_session, pnr_no)
+        if row is None:
+            last_msg = f"attempt {i} (after {sleep_sec}s): fetch failed — {msg}"
+            continue
+        got = row.get("pnrNo")
+        if got in protected_pnrs:
+            return None, (
+                f"⚠ STOP: reserve_info returned protected PNR {got} after {sleep_sec}s — "
+                f"보호 표 환불 위험 차단"
+            )
+        if got != pnr_no:
+            last_msg = f"attempt {i} (after {sleep_sec}s): PNR mismatch — requested {pnr_no} got {got}"
+            continue
+        # PNR matches — verify route + date
+        if row.get("dptRsStnCd") != expected_dep_code:
+            return None, f"dep mismatch: expected {expected_dep_code} got {row.get('dptRsStnCd')}"
+        if row.get("arvRsStnCd") != expected_arr_code:
+            return None, f"arr mismatch: expected {expected_arr_code} got {row.get('arvRsStnCd')}"
+        if row.get("dptDt") != expected_date:
+            return None, f"date mismatch: expected {expected_date} got {row.get('dptDt')}"
+        return row, f"matched after {sleep_sec}s (attempt {i})"
+    return None, last_msg
+
+
+def _srt_post_refund(srt_session, pnr_no: str, row: dict) -> tuple[bool, str]:
     payload = {
         "pnr_no": pnr_no,
         "cnc_dmn_cont": "card-test 자동환불",
-        "saleDt": d.get("ogtkSaleDt"),
-        "saleWctNo": d.get("ogtkSaleWctNo"),
-        "saleSqno": d.get("ogtkSaleSqno"),
-        "tkRetPwd": d.get("ogtkRetPwd"),
-        "psgNm": d.get("buyPsNm"),
+        "saleDt": row.get("ogtkSaleDt"),
+        "saleWctNo": row.get("ogtkSaleWctNo"),
+        "saleSqno": row.get("ogtkSaleSqno"),
+        "tkRetPwd": row.get("ogtkRetPwd"),
+        "psgNm": row.get("buyPsNm"),
     }
     if not all((payload["saleDt"], payload["saleWctNo"], payload["saleSqno"], payload["tkRetPwd"])):
-        return False, f"missing refund fields: {payload}"
+        return False, f"missing refund fields"
     r = srt_session.post(SRT_REFUND_URL, data=payload)
     try:
         resp = json.loads(r.text)
@@ -110,7 +136,7 @@ def _srt_safe_refund(srt_session, pnr_no: str, expected_dep: str, expected_arr: 
     code = resp.get("ErrorCode") or resp.get("strResult")
     if code in ("0", "SUCC"):
         return True, "refund OK"
-    return False, f"refund error: {resp.get('ErrorMsg') or resp.get('msgTxt') or resp}"
+    return False, f"refund error: {resp.get('ErrorMsg') or resp.get('msgTxt') or str(resp)[:120]}"
 
 
 def srt_card_test() -> CardTestResult:
@@ -178,10 +204,35 @@ def srt_card_test() -> CardTestResult:
     except Exception as e:
         r.step("pay", False, str(e)[:120])
 
-    # SAFETY 2+3: refund with route+date verification, scoped to our PNR
-    refunded, refund_msg = _srt_safe_refund(srt._session, test_pnr,
-                                             SRT_TEST_DEP, SRT_TEST_ARR, target_date)
-    r.step("refund", refunded, refund_msg)
+    # SAFETY 2+3: wait for SRT server sync, then verify PNR/route/date,
+    # then refund only if everything matches. Stops immediately if a
+    # protected PNR comes back (would mean refunding the wrong ticket).
+    if paid:
+        row, verify_msg = _srt_verify_pnr_match(
+            srt._session, test_pnr,
+            SRT_TEST_DEP_CODE, SRT_TEST_ARR_CODE, target_date,
+            protected_pnrs=existing,
+            retries=(5, 15, 30),
+        )
+        r.step("verify", row is not None, verify_msg)
+        if row is not None:
+            refunded, refund_msg = _srt_post_refund(srt._session, test_pnr, row)
+            r.step("refund", refunded, refund_msg)
+        else:
+            refunded = False
+            refund_msg = verify_msg
+            r.step("refund", False, "verify 실패로 환불 미시도 (안전상 차단)")
+    else:
+        # not paid → safe to call cancel (works on unpaid reservations)
+        try:
+            ok = srt.cancel(reservation)
+            r.step("cancel", ok, "취소 OK (결제 전)")
+            refunded = ok
+            refund_msg = "cancel ok" if ok else "cancel returned False"
+        except Exception as e:
+            r.step("cancel", False, str(e)[:120])
+            refunded = False
+            refund_msg = str(e)[:120]
 
     # SAFETY 4: post-refund audit — our PNR gone AND all protected PNRs still alive
     try:
