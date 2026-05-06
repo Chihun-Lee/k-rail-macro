@@ -296,9 +296,14 @@ function makeService(opts) {
       const cardLine = (hasAlwaysCard || s.has_card)
         ? `카드: <code>${s.card_masked || ("****" + s.card_last4)}</code> (할부 ${s.card_installment})`
         : `<span style="color:#888">카드 미저장 (수동 모드만 가능)</span>`;
-      const cardTestBtn = (hasAlwaysCard || s.has_card)
-        ? `<button id="${p('-btn-test-card')}" style="margin-left:4px">카드 테스트</button>`
-        : "";
+      // SRT card test is permanently disabled — server returns the wrong
+      // PNR for refund lookup so auto-refund cannot be made safe.
+      // KTX card test stays enabled (4-layer safety verified).
+      const cardTestBtn = svc === "srt"
+        ? `<span class="compact" style="margin-left:8px;color:#888">카드 테스트는 SRT 서버 제약으로 비활성화됨 (수동 결제 검증 권장)</span>`
+        : (s.has_card
+            ? `<button id="${p('-btn-test-card')}" style="margin-left:4px">카드 테스트</button>`
+            : "");
       $(p("-config-status")).innerHTML =
         `✔ 저장됨 — ${idLabel}: <code>${s.id}</code><br>${cardLine}
          <button id="${p('-btn-edit-config')}" style="margin-left:8px">수정</button>

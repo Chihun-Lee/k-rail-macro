@@ -32,6 +32,10 @@ curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-train-macro/main/insta
 - 토스트 알림 + 실시간 로그
 - 자격증명/잡 모두 SRT·KTX 별도 관리 (Keychain 항목 분리)
 
+### 카드 테스트
+- **KTX**: 활성. 서울→광명 25일 뒤 평일 첫차 reserve→pay→refund. 4겹 안전장치 (snapshot · PNR 일치 · route/date 검증 · post-audit). 위약금 약 400원/회.
+- **SRT**: 비활성. SRT 서버의 reserve_info endpoint가 referer를 무시하고 다른 결제완료 표 정보를 반환하는 설계라, 자동 환불을 안전하게 못 함. SRT 카드 결제 검증은 SRT 앱에서 수동으로.
+
 ## 기존 SRT/KTX 단독 사용자
 
 - Keychain 항목 이름이 같음 (`srt-macro` / `ktx-macro`) → **저장한 자격증명 그대로 마이그레이션됨**
