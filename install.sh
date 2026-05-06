@@ -17,11 +17,17 @@ echo "  K-Train 매크로 (SRT + KTX) 설치"
 echo "════════════════════════════════════════"
 echo ""
 
-echo "[1/5] Python 3.10+ 확인 (ensurepip 포함)..."
+echo "[1/5] Python 3.10+ 확인 (ensurepip + 아키텍처)..."
 # Apple stub Python 은 ensurepip 빠져있어 venv 안에 pip 가 안 깔림 →
 # ensurepip 모듈 import 가능한 인터프리터만 인정.
+# 추가로 system arch 와 Python arch 가 같아야 함 (Rosetta x86_64 Python on
+# Apple Silicon 인 경우 wheel 호환 안 됨 → "incompatible architecture" 임포트 실패)
+SYS_ARCH=$(uname -m)
 _check_py() {
-  "$1" -c 'import sys, ensurepip; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null
+  "$1" -c 'import sys, ensurepip; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null || return 1
+  local pa
+  pa=$("$1" -c 'import platform; print(platform.machine())' 2>/dev/null)
+  [ "$pa" = "$SYS_ARCH" ]
 }
 PYTHON_BIN=""
 for cand in python3.13 python3.12 python3.11 python3.10; do
@@ -93,12 +99,18 @@ fi
 echo "  ✓ $INSTALL_DIR"
 
 echo "[3/5] Python 환경 구성 (1~3분 소요)..."
-# venv 가 너무 낮은 파이썬으로 만들어졌거나 pip 가 빠져있으면 재생성
-if [ -x "$INSTALL_DIR/venv/bin/python" ]; then
-  if ! "$INSTALL_DIR/venv/bin/python" -c 'import sys, pip; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
-    echo "  → 기존 venv 가 3.10 미만 또는 pip 없음 → 재생성"
-    rm -rf "$INSTALL_DIR/venv"
-  fi
+# venv 가 호환 안 되면 (낮은 파이썬, pip 없음, arch mismatch) 재생성
+_venv_ok() {
+  local p="$INSTALL_DIR/venv/bin/python"
+  [ -x "$p" ] || return 1
+  "$p" -c 'import sys, pip; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null || return 1
+  local pa
+  pa=$("$p" -c 'import platform; print(platform.machine())' 2>/dev/null)
+  [ "$pa" = "$SYS_ARCH" ]
+}
+if [ -x "$INSTALL_DIR/venv/bin/python" ] && ! _venv_ok; then
+  echo "  → 기존 venv 가 3.10 미만 / pip 없음 / arch mismatch → 재생성"
+  rm -rf "$INSTALL_DIR/venv"
 fi
 if [ ! -x "$INSTALL_DIR/venv/bin/python" ]; then
   "$PYTHON_BIN" -m venv "$INSTALL_DIR/venv"
