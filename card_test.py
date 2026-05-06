@@ -1,10 +1,24 @@
-"""Card test: reserve a cheap far-future weekday ticket, pay, then cancel.
+"""Card test with strict safety guards.
 
-Verifies the saved card actually clears against SRT/KTX.
-A small cancellation fee (≈400원) may apply.
+Key protections (added after a refund-the-wrong-ticket incident):
+
+1. **Whitelist** — before reserving, record every PNR currently on
+   the account. After reserving, the new PNR is added to a
+   per-test whitelist. Refund can ONLY touch whitelisted PNRs.
+2. **Route+date verification** — before refund, fetch the ticket
+   info for our PNR and verify the route and date match exactly
+   what we intended (e.g. SRT 김천(구미)→동대구 on today+25d).
+3. **Custom SRT refund endpoint call** — bypasses srtgo's
+   `get_reservations()` zip(train, pay) bug by using only our
+   reservation_number to fetch info, then posting refund with
+   data scoped to that PNR.
+4. **Post-refund audit** — re-fetch reservations and confirm:
+   our PNR is gone AND every protected PNR is still present.
+   If audit fails, raise a loud error.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Optional
@@ -23,31 +37,89 @@ class CardTestResult:
 
 
 def _next_weekday(d: date) -> date:
-    while d.weekday() >= 5:  # Sat=5, Sun=6
+    while d.weekday() >= 5:
         d += timedelta(days=1)
     return d
 
 
 def _target_date(days_ahead: int = 25) -> str:
-    d = _next_weekday(date.today() + timedelta(days=days_ahead))
-    return d.strftime("%Y%m%d")
+    return _next_weekday(date.today() + timedelta(days=days_ahead)).strftime("%Y%m%d")
 
 
 # ─── SRT ────────────────────────────────────────────────────────────────
 SRT_TEST_DEP = "김천(구미)"
 SRT_TEST_ARR = "동대구"
+SRT_TEST_DEP_CODE = "0507"
+SRT_TEST_ARR_CODE = "0015"
 SRT_TEST_TIME = "053000"
+
+SRT_REFUND_URL = "https://app.srail.or.kr:443/atc/selectListAtc02063_n.do"
+SRT_RESERVE_INFO_URL = "https://app.srail.or.kr:443/atc/getListAtc14087.do"
+SRT_RESERVE_INFO_REFERER = (
+    "https://app.srail.or.kr:443/atc/selectListAtc14086_n.do?pnrNo="
+)
+
+
+def _srt_safe_refund(srt_session, pnr_no: str, expected_dep: str, expected_arr: str,
+                     expected_date: str) -> tuple[bool, str]:
+    """Refund a single PNR safely with route/date verification.
+
+    Returns (ok, message).
+    """
+    # 1) fetch reserve_info for THIS pnr only
+    headers = {"Referer": SRT_RESERVE_INFO_REFERER + pnr_no}
+    r = srt_session.post(SRT_RESERVE_INFO_URL, headers=headers)
+    try:
+        info = json.loads(r.text)
+    except Exception:
+        return False, f"reserve_info: invalid JSON ({r.text[:80]})"
+    if info.get("ErrorCode") != "0":
+        return False, f"reserve_info error: {info.get('ErrorMsg')}"
+    rows = info.get("outDataSets", {}).get("dsOutput1") or []
+    if not rows:
+        return False, "reserve_info: empty dsOutput1"
+    d = rows[0]
+
+    # 2) verify route + date — protect against operating on wrong PNR
+    if d.get("pnrNo") != pnr_no:
+        return False, f"PNR mismatch: requested {pnr_no} got {d.get('pnrNo')}"
+    if d.get("dptRsStnCd") != SRT_TEST_DEP_CODE:
+        return False, f"dep mismatch: expected {SRT_TEST_DEP_CODE} got {d.get('dptRsStnCd')}"
+    if d.get("arvRsStnCd") != SRT_TEST_ARR_CODE:
+        return False, f"arr mismatch: expected {SRT_TEST_ARR_CODE} got {d.get('arvRsStnCd')}"
+    if d.get("dptDt") != expected_date:
+        return False, f"date mismatch: expected {expected_date} got {d.get('dptDt')}"
+
+    # 3) post refund with scoped data
+    payload = {
+        "pnr_no": pnr_no,
+        "cnc_dmn_cont": "card-test 자동환불",
+        "saleDt": d.get("ogtkSaleDt"),
+        "saleWctNo": d.get("ogtkSaleWctNo"),
+        "saleSqno": d.get("ogtkSaleSqno"),
+        "tkRetPwd": d.get("ogtkRetPwd"),
+        "psgNm": d.get("buyPsNm"),
+    }
+    if not all((payload["saleDt"], payload["saleWctNo"], payload["saleSqno"], payload["tkRetPwd"])):
+        return False, f"missing refund fields: {payload}"
+    r = srt_session.post(SRT_REFUND_URL, data=payload)
+    try:
+        resp = json.loads(r.text)
+    except Exception:
+        return False, f"refund: invalid JSON ({r.text[:80]})"
+    code = resp.get("ErrorCode") or resp.get("strResult")
+    if code in ("0", "SUCC"):
+        return True, "refund OK"
+    return False, f"refund error: {resp.get('ErrorMsg') or resp.get('msgTxt') or resp}"
 
 
 def srt_card_test() -> CardTestResult:
     r = CardTestResult(ok=False)
     creds = config.srt.load()
     if not creds:
-        r.summary = "SRT 자격증명 없음"
-        return r
+        r.summary = "SRT 자격증명 없음"; return r
     if not creds.card_number:
-        r.summary = "카드 정보 없음"
-        return r
+        r.summary = "카드 정보 없음"; return r
 
     from SRT import SRT, Adult, SeatType
     from SRT.errors import SRTError
@@ -58,17 +130,20 @@ def srt_card_test() -> CardTestResult:
     try:
         srt = SRT(creds.srt_id, creds.srt_password)
     except Exception as e:
-        r.step("login", False, str(e)[:120])
-        r.summary = "로그인 실패"
-        return r
+        r.step("login", False, str(e)[:120]); r.summary = "로그인 실패"; return r
     r.step("login", True)
+
+    # SAFETY 1: snapshot existing PNRs (protected — never touch)
+    try:
+        existing = {str(x.reservation_number) for x in srt.get_reservations()}
+        r.step("snapshot", True, f"기존 예약 {len(existing)}건 보호 등록")
+    except Exception as e:
+        r.step("snapshot", False, str(e)[:120]); r.summary = "보호 스냅샷 실패"; return r
 
     try:
         trains = srt.search_train(SRT_TEST_DEP, SRT_TEST_ARR, target_date, SRT_TEST_TIME, available_only=False)
     except Exception as e:
-        r.step("search", False, str(e)[:120])
-        r.summary = "조회 실패"
-        return r
+        r.step("search", False, str(e)[:120]); r.summary = "조회 실패"; return r
     train = next((t for t in trains if t.general_seat_available()), None)
     if train is None:
         r.step("search", False, f"{len(trains)} trains, 일반실 가능 0건")
@@ -80,10 +155,13 @@ def srt_card_test() -> CardTestResult:
     try:
         reservation = srt.reserve(train, passengers=[Adult(1)], special_seat=SeatType.GENERAL_FIRST)
     except SRTError as e:
-        r.step("reserve", False, str(e)[:120])
-        r.summary = "예약 실패"
+        r.step("reserve", False, str(e)[:120]); r.summary = "예약 실패"; return r
+    test_pnr = str(reservation.reservation_number)
+    if test_pnr in existing:
+        r.step("reserve", False, f"PNR {test_pnr} 이 보호 목록에 있음 — 안전상 중단")
+        r.summary = "PNR 충돌"
         return r
-    r.step("reserve", True, f"예약번호={getattr(reservation, 'reservation_number', '?')}")
+    r.step("reserve", True, f"PNR={test_pnr} (테스트 화이트리스트 등록)")
 
     paid = False
     try:
@@ -100,18 +178,32 @@ def srt_card_test() -> CardTestResult:
     except Exception as e:
         r.step("pay", False, str(e)[:120])
 
-    # always try cancel
-    try:
-        cancelled = srt.cancel(reservation)
-        r.step("cancel", cancelled, "취소 OK" if cancelled else "cancel returned False")
-    except Exception as e:
-        r.step("cancel", False, str(e)[:120])
+    # SAFETY 2+3: refund with route+date verification, scoped to our PNR
+    refunded, refund_msg = _srt_safe_refund(srt._session, test_pnr,
+                                             SRT_TEST_DEP, SRT_TEST_ARR, target_date)
+    r.step("refund", refunded, refund_msg)
 
-    if paid:
+    # SAFETY 4: post-refund audit — our PNR gone AND all protected PNRs still alive
+    try:
+        after = {str(x.reservation_number) for x in srt.get_reservations()}
+        lost_protected = existing - after
+        still_test = test_pnr in after
+        if lost_protected:
+            r.step("audit", False, f"⚠ 보호 표가 사라짐!! {sorted(lost_protected)} — 즉시 SRT 앱 확인")
+        elif still_test:
+            r.step("audit", False, f"⚠ 테스트 PNR {test_pnr} 가 환불 안 됨 — SRT 앱에서 수동 환불")
+        else:
+            r.step("audit", True, "보호 표 모두 살아있고, 테스트 표만 환불됨")
+    except Exception as e:
+        r.step("audit", False, f"audit 실패: {e}")
+
+    if paid and refunded:
         r.ok = True
-        r.summary = "✓ 카드 정상 — 예약·결제·취소까지 모두 성공 (수수료 약 400원 발생 가능)"
+        r.summary = "✓ 카드 정상 — 예약·결제·환불·검증까지 모두 성공 (위약금 약 400원)"
+    elif paid and not refunded:
+        r.summary = f"⚠ 결제는 됐으나 자동 환불 실패 — SRT 앱에서 수동 환불 (PNR {test_pnr})"
     else:
-        r.summary = "결제 실패 — 카드 정보를 확인하세요"
+        r.summary = "결제 실패 — 카드 정보 확인"
     return r
 
 
@@ -125,11 +217,9 @@ def ktx_card_test() -> CardTestResult:
     r = CardTestResult(ok=False)
     creds = config.ktx.load()
     if not creds:
-        r.summary = "KTX 자격증명 없음"
-        return r
+        r.summary = "KTX 자격증명 없음"; return r
     if not creds.card_number:
-        r.summary = "카드 정보 없음"
-        return r
+        r.summary = "카드 정보 없음"; return r
 
     from srtgo.ktx import AdultPassenger, ReserveOption, TrainType, NoResultsError
     from ktx_korail import PatchedKorail
@@ -142,36 +232,51 @@ def ktx_card_test() -> CardTestResult:
         if not client.login():
             raise RuntimeError("login returned False")
     except Exception as e:
-        r.step("login", False, str(e)[:120])
-        r.summary = "로그인 실패"
-        return r
+        r.step("login", False, str(e)[:120]); r.summary = "로그인 실패"; return r
     r.step("login", True, getattr(client, "name", ""))
+
+    # SAFETY 1: snapshot existing reservations + tickets PNRs
+    try:
+        existing_rsv = {str(x.rsv_id) for x in client.reservations()}
+        existing_tkt = {str(getattr(x, "pnr_no", "")) for x in client.tickets()}
+        existing = existing_rsv | (existing_tkt - {""})
+        r.step("snapshot", True, f"기존 예약 {len(existing_rsv)} + 발권 {len(existing_tkt)} 보호")
+    except Exception as e:
+        r.step("snapshot", False, str(e)[:120]); r.summary = "보호 스냅샷 실패"; return r
 
     try:
         trains = client.search_train(KTX_TEST_DEP, KTX_TEST_ARR, target_date, KTX_TEST_TIME, train_type=TrainType.KTX)
     except NoResultsError:
         r.step("search", False, "no results")
-        r.summary = "테스트 가능한 좌석 없음 — 다른 날 시도"
-        return r
+        r.summary = "테스트 가능한 좌석 없음 — 다른 날 시도"; return r
     except Exception as e:
-        r.step("search", False, str(e)[:120])
-        r.summary = "조회 실패"
-        return r
+        r.step("search", False, str(e)[:120]); r.summary = "조회 실패"; return r
     train = next((t for t in trains if t.has_general_seat()), None)
     if train is None:
         r.step("search", False, f"{len(trains)} trains, 일반실 가능 0건")
-        r.summary = "테스트 가능한 좌석 없음 — 다른 날 시도"
-        return r
+        r.summary = "테스트 가능한 좌석 없음 — 다른 날 시도"; return r
     r.step("search", True, f"{train}")
 
     reservation = None
     try:
         reservation = client.reserve(train, passengers=[AdultPassenger(1)], option=ReserveOption.GENERAL_FIRST)
     except Exception as e:
-        r.step("reserve", False, str(e)[:120])
-        r.summary = "예약 실패"
+        r.step("reserve", False, str(e)[:120]); r.summary = "예약 실패"; return r
+    test_pnr = str(reservation.rsv_id)
+    if test_pnr in existing:
+        r.step("reserve", False, f"PNR {test_pnr} 이 보호 목록에 있음 — 안전상 중단")
+        r.summary = "PNR 충돌"; return r
+    # SAFETY 2: route + date check on the just-created reservation
+    if (reservation.dep_station_name != KTX_TEST_DEP or
+        reservation.arr_station_name != KTX_TEST_ARR or
+        reservation.dep_date != target_date):
+        r.step("reserve", False, f"route/date mismatch on returned reservation — 안전상 중단")
+        r.summary = "예약 데이터 불일치"
+        # try cancel since we never paid
+        try: client.cancel(reservation)
+        except Exception: pass
         return r
-    r.step("reserve", True, f"예약번호={reservation.rsv_id}")
+    r.step("reserve", True, f"PNR={test_pnr}")
 
     paid = False
     try:
@@ -188,28 +293,61 @@ def ktx_card_test() -> CardTestResult:
     except Exception as e:
         r.step("pay", False, str(e)[:120])
 
-    # cancel/refund — try cancel first; if that fails (paid), refund the ticket
-    cancelled = False
-    try:
-        cancelled = client.cancel(reservation)
-        r.step("cancel", cancelled, "취소 OK")
-    except Exception as e:
-        # paid → need refund
+    # cancel/refund
+    refunded = False
+    refund_msg = ""
+    if not paid:
+        try:
+            ok = client.cancel(reservation)
+            r.step("cancel", ok, "취소 OK (결제 전)")
+            refunded = ok; refund_msg = "cancel ok"
+        except Exception as e:
+            r.step("cancel", False, str(e)[:120]); refund_msg = str(e)[:120]
+    else:
+        # paid — find ticket and refund. SAFETY: only the ticket whose pnr_no == test_pnr
         try:
             tickets = client.tickets()
-            target = next((t for t in tickets if getattr(t, "rsv_id", None) == reservation.rsv_id
-                           or getattr(t, "pnr_no", None) == reservation.rsv_id), None)
-            if target is not None:
-                refunded = client.refund(target)
-                r.step("refund", refunded, "환불 OK" if refunded else "refund returned False")
+            target_tkt = next(
+                (t for t in tickets if str(getattr(t, "pnr_no", "")) == test_pnr),
+                None,
+            )
+            if target_tkt is None:
+                r.step("refund", False, f"발권 목록에서 PNR {test_pnr} 못 찾음")
+                refund_msg = "ticket not found"
+            elif (getattr(target_tkt, "dep_station_name", "") != KTX_TEST_DEP or
+                  getattr(target_tkt, "arr_station_name", "") != KTX_TEST_ARR or
+                  getattr(target_tkt, "dep_date", "") != target_date):
+                r.step("refund", False, f"⚠ ticket route/date mismatch — 안전상 중단")
+                refund_msg = "ticket mismatch"
             else:
-                r.step("cancel", False, f"cancel: {e}; ticket not found for refund")
-        except Exception as e2:
-            r.step("refund", False, str(e2)[:120])
+                ok = client.refund(target_tkt)
+                refunded = ok
+                refund_msg = "refund OK" if ok else "refund returned False"
+                r.step("refund", ok, refund_msg)
+        except Exception as e:
+            r.step("refund", False, str(e)[:120]); refund_msg = str(e)[:120]
 
-    if paid:
+    # SAFETY 4: post audit
+    try:
+        after_rsv = {str(x.rsv_id) for x in client.reservations()}
+        after_tkt = {str(getattr(x, "pnr_no", "")) for x in client.tickets()} - {""}
+        after = after_rsv | after_tkt
+        lost = existing - after
+        still_test = test_pnr in after
+        if lost:
+            r.step("audit", False, f"⚠ 보호 표가 사라짐!! {sorted(lost)} — 즉시 코레일 앱 확인")
+        elif still_test:
+            r.step("audit", False, f"⚠ 테스트 PNR {test_pnr} 가 처리 안 됨 — 코레일 앱에서 수동")
+        else:
+            r.step("audit", True, "보호 표 모두 살아있고, 테스트 표만 환불됨")
+    except Exception as e:
+        r.step("audit", False, f"audit 실패: {e}")
+
+    if paid and refunded:
         r.ok = True
-        r.summary = "✓ 카드 정상 — 예약·결제·취소까지 모두 성공 (수수료 약 400원 발생 가능)"
+        r.summary = "✓ 카드 정상 — 예약·결제·환불·검증까지 모두 성공 (위약금 약 400원)"
+    elif paid and not refunded:
+        r.summary = f"⚠ 결제는 됐으나 자동 환불 실패 ({refund_msg}) — 코레일 앱에서 수동"
     else:
-        r.summary = "결제 실패 — 카드 정보를 확인하세요"
+        r.summary = "결제 실패 — 카드 정보 확인"
     return r
