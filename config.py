@@ -8,10 +8,20 @@ saved credentials when migrating to the unified app.
 from __future__ import annotations
 
 import json
+import sys
 from typing import Optional
 
 import keyring
 from pydantic import BaseModel, Field
+
+
+def storage_label() -> str:
+    """현재 OS의 자격증명 저장소 표시 이름 (keyring 백엔드에 대응)."""
+    if sys.platform == "win32":
+        return "Windows 자격 증명 관리자"
+    if sys.platform == "darwin":
+        return "macOS Keychain"
+    return "시스템 자격증명 저장소"
 
 
 # ─── SRT ────────────────────────────────────────────────────────────────
@@ -78,7 +88,7 @@ class _SRT(_Namespace):
     def public_status(self) -> dict:
         c = self.load()
         if not c:
-            return {"configured": False}
+            return {"configured": False, "storage": storage_label()}
         masked = "*" * (len(c.card_number) - 4) + c.card_number[-4:]
         return {
             "configured": True,
@@ -87,7 +97,7 @@ class _SRT(_Namespace):
             "card_masked": masked,
             "card_type": c.card_type,
             "card_installment": c.card_installment,
-            "storage": "macOS Keychain",
+            "storage": storage_label(),
         }
 
 
@@ -98,13 +108,13 @@ class _KTX(_Namespace):
     def public_status(self) -> dict:
         c = self.load()
         if not c:
-            return {"configured": False}
+            return {"configured": False, "storage": storage_label()}
         has_card = bool(c.card_number)
         out = {
             "configured": True,
             "id": c.ktx_id,
             "has_card": has_card,
-            "storage": "macOS Keychain",
+            "storage": storage_label(),
         }
         if has_card:
             out["card_last4"] = c.card_number[-4:]

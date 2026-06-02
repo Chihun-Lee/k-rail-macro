@@ -1,0 +1,57 @@
+name: build-windows-exe
+
+# SRT + KTX 통합 단일 .exe 빌드.
+# 수동 실행(Actions → Run workflow)으로 테스트, v* 태그 푸시 시 Release 첨부.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pywin32-ctypes
+
+      - name: Build single exe
+        # srtgo는 collect-all 금지 — CLI(srtgo.srtgo)가 telegram/inquirer를 끌어와
+        # 빌드를 깨뜨린다. srtgo.ktx만 hidden-import로 명시하고 나머지는 import 추적.
+        # Crypto(pycryptodome)는 바이너리 확장이라 collect-all 필요.
+        run: >
+          pyinstaller --onefile --noconfirm --clean
+          --name k-train-macro
+          --add-data "static;static"
+          --collect-all uvicorn
+          --collect-all keyring
+          --collect-all Crypto
+          --collect-submodules anyio
+          --hidden-import win32ctypes.core
+          --hidden-import keyring.backends.Windows
+          --hidden-import srtgo.ktx
+          launch.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: k-train-macro-windows
+          path: dist/k-train-macro.exe
+
+      - name: Attach to release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/k-train-macro.exe
