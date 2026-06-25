@@ -318,8 +318,8 @@ def ktx_card_test() -> CardTestResult:
         r.step("reserve", False, f"PNR {test_pnr} 이 보호 목록에 있음 — 안전상 중단")
         r.summary = "PNR 충돌"; return r
     # SAFETY 2: route + date check on the just-created reservation
-    if (reservation.dep_station_name != KTX_TEST_DEP or
-        reservation.arr_station_name != KTX_TEST_ARR or
+    if (reservation.dep_name != KTX_TEST_DEP or
+        reservation.arr_name != KTX_TEST_ARR or
         reservation.dep_date != target_date):
         r.step("reserve", False, f"route/date mismatch on returned reservation — 안전상 중단")
         r.summary = "예약 데이터 불일치"
@@ -365,8 +365,8 @@ def ktx_card_test() -> CardTestResult:
             if target_tkt is None:
                 r.step("refund", False, f"발권 목록에서 PNR {test_pnr} 못 찾음")
                 refund_msg = "ticket not found"
-            elif (getattr(target_tkt, "dep_station_name", "") != KTX_TEST_DEP or
-                  getattr(target_tkt, "arr_station_name", "") != KTX_TEST_ARR or
+            elif (getattr(target_tkt, "dep_name", "") != KTX_TEST_DEP or
+                  getattr(target_tkt, "arr_name", "") != KTX_TEST_ARR or
                   getattr(target_tkt, "dep_date", "") != target_date):
                 r.step("refund", False, f"⚠ ticket route/date mismatch — 안전상 중단")
                 refund_msg = "ticket mismatch"
