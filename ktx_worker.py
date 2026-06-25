@@ -153,6 +153,9 @@ class JobManager:
             c = PatchedKorail(creds.ktx_id, creds.ktx_password, auto_login=False)
             if not c.login():
                 raise RuntimeError("login returned False")
+            # 폴링 루프의 모든 HTTP 호출에 타임아웃 강제 (없으면 서버가 연결을
+            # 물고 있을 때 search_train 무한 대기 → 스레드 멈춤).
+            _force_session_timeout(c._session, 25)
             return c
 
         try:

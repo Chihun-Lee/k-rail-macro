@@ -47,9 +47,16 @@ def test_success_resets():
 
 
 # ── 2. 워커 통합: 4999 폭격 후 회복 (FakeSRT) ──────────────────────────
+class _FakeSession:
+    """_force_session_timeout가 감쌀 수 있도록 request 속성만 가진 더미 세션."""
+    def request(self, method, url, **kw):
+        return None
+
+
 class _FakeNF:
     def __init__(self):
         self._cached_key = "poisoned"
+        self.session = _FakeSession()
 
 
 class FakeSRT:
@@ -59,6 +66,7 @@ class FakeSRT:
 
     def __init__(self, *a, **k):
         FakeSRT.created += 1
+        self._session = _FakeSession()
         self.netfunnel_helper = _FakeNF()
 
     def search_train(self, *a, **k):
@@ -113,11 +121,45 @@ def test_worker_recovers_without_wedging(monkeypatch=None):
           f"fresh_sessions={FakeSRT.created} successes={FakeSRT.successes} status={job.status}")
 
 
+# ── 3. HTTP 타임아웃 강제 (행 방지) ────────────────────────────────────
+def test_force_session_timeout_injects_default():
+    captured = {}
+
+    class S:
+        def request(self, method, url, **kw):
+            captured.update(kw)
+            return "resp"
+
+    s = S()
+    srt_worker._force_session_timeout(s, 25)
+    s.request("GET", "http://x")           # 호출자가 timeout을 안 줘도
+    assert captured.get("timeout") == 25, captured   # 25초가 주입돼야 함
+    # 호출자가 명시하면 그 값을 존중
+    s.request("GET", "http://x", timeout=3)
+    assert captured.get("timeout") == 3, captured
+    assert getattr(s, "_kt_timeout_patched", False) is True
+    print("  [ok] 세션 타임아웃 주입(기본 25s, 명시값 존중) → 무한 대기 방지")
+
+
+def test_new_client_patches_sessions():
+    # _new_client가 클라이언트/넷퍼넬 세션 둘 다 타임아웃 패치하는지
+    srt_worker.SRT = FakeSRT
+    c = FakeSRT()
+    srt_worker._force_session_timeout(c._session, 25)
+    srt_worker._force_session_timeout(c.netfunnel_helper.session, 25)
+    assert c._session._kt_timeout_patched
+    assert c.netfunnel_helper.session._kt_timeout_patched
+    print("  [ok] _new_client 세션/넷퍼넬 세션 모두 타임아웃 적용")
+
+
 if __name__ == "__main__":
     print("recovery 백오프/에스컬레이션:")
     test_backoff_grows_and_caps()
     test_fresh_login_escalation()
     test_success_resets()
+    print("HTTP 타임아웃(행 방지):")
+    test_force_session_timeout_injects_default()
+    test_new_client_patches_sessions()
     print("워커 자가복구 통합:")
     test_worker_recovers_without_wedging()
     print("\nALL PASS ✅")

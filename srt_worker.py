@@ -127,7 +127,15 @@ class JobManager:
             return
 
         def _new_client() -> SRT:
-            return SRT(creds.srt_id, creds.srt_password)
+            c = SRT(creds.srt_id, creds.srt_password)
+            # 폴링 루프의 모든 HTTP 호출에 타임아웃을 강제한다. 없으면 SRT/넷퍼넬
+            # 서버가 연결을 물고 안 놓을 때 search_train이 무한 대기 → 스레드가
+            # 통째로 멈춰 "수백 번 돌다 안 돌아옴" 증상이 난다.
+            _force_session_timeout(c._session, 25)
+            helper = getattr(c, "netfunnel_helper", None)
+            if helper is not None and hasattr(helper, "session"):
+                _force_session_timeout(helper.session, 25)
+            return c
 
         try:
             srt = _new_client()
