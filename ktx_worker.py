@@ -27,8 +27,9 @@ import config
 from ktx_korail import PatchedKorail
 from recovery import RecoveryController
 
-MIN_INTERVAL = 1.0
-MAX_INTERVAL = 30.0
+# 정상 폴링 간격(랜덤). 속도제한을 덜 건드리도록 보수적으로 잡는다.
+MIN_INTERVAL = 2.0
+MAX_INTERVAL = 60.0
 # 세션을 만료 전에 미리 갱신해 만료발(發) 오류를 예방한다(선제 재로그인).
 SESSION_MAX_AGE = 600.0
 # 정상 검색이 이 시간 이상 끊기면 세션이 꼬인 것으로 보고 강제로 새 세션을 만든다.
