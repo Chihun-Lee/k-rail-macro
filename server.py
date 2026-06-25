@@ -338,7 +338,17 @@ def ktx_card_test():
         raise HTTPException(status_code=404, detail="not configured")
     if not c.card_number:
         raise HTTPException(status_code=400, detail="카드 정보가 없습니다")
-    r = card_test.ktx_card_test()
+    # 카드 테스트 중 예기치 못한 예외는 불투명한 500("인터널 에러") 대신
+    # 실제 원인을 화면에 보여줘 진단 가능하게 한다.
+    try:
+        r = card_test.ktx_card_test()
+    except Exception as e:
+        detail = _safe_err(e)
+        return {
+            "ok": False,
+            "summary": f"카드 테스트 내부 오류: {detail}",
+            "steps": [{"name": "error", "ok": False, "detail": detail}],
+        }
     return {"ok": r.ok, "summary": r.summary, "steps": r.steps}
 
 
