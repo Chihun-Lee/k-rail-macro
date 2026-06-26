@@ -15,9 +15,11 @@ import time
 import types
 
 from SRT.errors import SRTNetFunnelError
+from srtgo.ktx import KorailError
 
 import recovery
 import srt_worker
+import ktx_worker
 
 
 # ── 1. 백오프 수학 / 에스컬레이션 (순수) ────────────────────────────────
@@ -176,6 +178,102 @@ def test_worker_survives_nonstring_netfunnel_msg():
           f"successes={FakeSRTConnErr.successes}")
 
 
+# ── 2b. KTX 워커: 안티봇 폭격 후 회복 + 비문자열 msg 생존 ──────────────
+class _FakeKorailSession:
+    def request(self, method, url, **kw):
+        return None
+
+
+class FakeKorail:
+    """KTX 워커용 더미. search_train이 안티봇(MACRO) 오류를 N회 던진 뒤 성공."""
+    created = 0
+    fail_remaining = 4
+    successes = 0
+    raise_nonstring = False  # True면 str()가 깨지는 예외를 던진다
+
+    def __init__(self, *a, **k):
+        FakeKorail.created += 1
+        self.name = "tester"
+        self._session = _FakeKorailSession()
+
+    def login(self):
+        return True
+
+    def search_train(self, *a, **k):
+        if FakeKorail.fail_remaining > 0:
+            FakeKorail.fail_remaining -= 1
+            if FakeKorail.raise_nonstring:
+                raise _NonStrExc()
+            raise KorailError("MACRO ERROR: 원활한 서비스 제공을 위해...")
+        FakeKorail.successes += 1
+        return []
+
+
+class _NonStrExc(Exception):
+    """str(e)가 TypeError를 던지는 예외(폴링 스레드 사망 재현). catch-all이
+    _safe_err로 안전 변환해 살아남아야 한다."""
+    def __init__(self):
+        self.msg = ConnectionError("non-str msg")
+
+    def __str__(self):
+        raise TypeError("non-string msg")
+
+
+def _setup_ktx(fake_cls):
+    fake_cls.created = 0
+    fake_cls.successes = 0
+    orig_rc = ktx_worker.RecoveryController
+    ktx_worker.RecoveryController = lambda *a, **k: orig_rc(
+        base=0.01, cap=0.05, fresh_login_every=2, jitter=(1.0, 1.0)
+    )
+    ktx_worker.PatchedKorail = fake_cls
+    ktx_worker.MIN_INTERVAL = 0.01
+    ktx_worker.MAX_INTERVAL = 0.01
+    ktx_worker.SESSION_MAX_AGE = 1e9
+    ktx_worker.STALL_LIMIT = 1e9
+    ktx_worker.config.ktx.load = lambda: types.SimpleNamespace(
+        ktx_id="tester", ktx_password="pw", card_number="",
+        card_password="", card_validation="", card_expire="", card_installment=0,
+    )
+
+
+def _run_ktx_job():
+    spec = ktx_worker.JobSpec(
+        dep="서울", arr="부산", date="20260701", time="090000",
+        train_id="NONE|0|0", train_type="ktx", passengers=1,
+        seat_pref="any", pay_mode=ktx_worker.PayMode.MANUAL,
+    )
+    job = ktx_worker.manager.create(spec)
+    deadline = time.time() + 5
+    while time.time() < deadline and FakeKorail.successes < 1:
+        time.sleep(0.05)
+    ktx_worker.manager.stop(job.id)
+    time.sleep(0.1)
+    return job
+
+
+def test_ktx_recovers_from_antibot():
+    FakeKorail.raise_nonstring = False
+    FakeKorail.fail_remaining = 4
+    _setup_ktx(FakeKorail)
+    job = _run_ktx_job()
+    assert FakeKorail.successes >= 1, "안티봇 차단에서 끝내 회복 못함(예매 멈춤)"
+    assert job.recoveries >= 4, f"recoveries={job.recoveries}"
+    assert FakeKorail.created >= 2, f"새 세션 에스컬레이션 안 됨(created={FakeKorail.created})"
+    print(f"  [ok] KTX 안티봇(MACRO) 4회 후 회복: recoveries={job.recoveries} "
+          f"fresh_sessions={FakeKorail.created}")
+
+
+def test_ktx_survives_nonstring_msg():
+    FakeKorail.raise_nonstring = True
+    FakeKorail.fail_remaining = 3
+    _setup_ktx(FakeKorail)
+    job = _run_ktx_job()
+    FakeKorail.raise_nonstring = False
+    assert FakeKorail.successes >= 1, "비문자열 msg 예외에서 KTX 스레드 사망(버그 재현)"
+    print(f"  [ok] KTX 비문자열 msg 예외 3회 후 생존·회복: successes={FakeKorail.successes}")
+
+
 # ── 3. HTTP 타임아웃 강제 (행 방지) ────────────────────────────────────
 def test_force_session_timeout_injects_default():
     captured = {}
@@ -215,7 +313,10 @@ if __name__ == "__main__":
     print("HTTP 타임아웃(행 방지):")
     test_force_session_timeout_injects_default()
     test_new_client_patches_sessions()
-    print("워커 자가복구 통합:")
+    print("SRT 워커 자가복구 통합:")
     test_worker_recovers_without_wedging()
     test_worker_survives_nonstring_netfunnel_msg()
+    print("KTX 워커 자가복구 통합:")
+    test_ktx_recovers_from_antibot()
+    test_ktx_survives_nonstring_msg()
     print("\nALL PASS ✅")

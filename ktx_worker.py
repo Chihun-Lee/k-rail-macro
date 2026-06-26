@@ -27,14 +27,30 @@ import config
 from ktx_korail import PatchedKorail
 from recovery import RecoveryController
 
-# 정상 폴링 간격(랜덤). 속도제한을 덜 건드리도록 보수적으로 잡는다.
-MIN_INTERVAL = 2.0
-MAX_INTERVAL = 60.0
+# 정상 폴링 간격(랜덤). 속도제한을 덜 건드리도록 보수적으로 잡는다(안정성 우선 1.5배).
+MIN_INTERVAL = 3.0
+MAX_INTERVAL = 90.0
 # 세션을 만료 전에 미리 갱신해 만료발(發) 오류를 예방한다(선제 재로그인).
 SESSION_MAX_AGE = 600.0
 # 정상 검색이 이 시간 이상 끊기면 세션이 꼬인 것으로 보고 강제로 새 세션을 만든다.
 STALL_LIMIT = 240.0
 LOG_LIMIT = 500
+
+
+def _safe_err(e: BaseException) -> str:
+    """예외를 안전하게 문자열로 변환한다.
+
+    일부 라이브러리는 네트워크 오류를 예외객체(문자열 아님)로 .msg에 감싸 던져,
+    예외의 __str__가 비문자열을 반환해 `str(e)` 호출 자체가 TypeError를 던지는
+    경우가 있다(폴링 스레드 사망). SRT 워커와 동일하게 안전 변환으로 막는다.
+    """
+    msg = getattr(e, "msg", None)
+    if msg is not None and not isinstance(msg, str):
+        return f"{type(e).__name__}: {msg!r}"
+    try:
+        return str(e)
+    except Exception:
+        return repr(e)
 
 
 class JobStatus(str, Enum):
@@ -164,8 +180,8 @@ class JobManager:
             session_started = time.monotonic()
         except Exception as e:
             job.status = JobStatus.ERROR
-            job.error = f"login failed: {e}"
-            job.log(f"login failed: {e}")
+            job.error = f"login failed: {_safe_err(e)}"
+            job.log(f"login failed: {_safe_err(e)}")
             return
 
         job.log(
@@ -194,7 +210,7 @@ class JobManager:
                     client = _new_client()
                     session_started = time.monotonic()
                 except Exception as e2:
-                    job.log(f"새 세션 실패(대기 후 재시도): {e2}")
+                    job.log(f"새 세션 실패(대기 후 재시도): {_safe_err(e2)}")
             else:
                 job.log(
                     f"안티봇 차단 #{rec.streak} (속도제한) → "
@@ -213,7 +229,7 @@ class JobManager:
                     client = _new_client()
                     session_started = time.monotonic()
                 except Exception as e:
-                    job.log(f"선제 재로그인 실패: {e}")
+                    job.log(f"선제 재로그인 실패: {_safe_err(e)}")
 
             try:
                 trains = client.search_train(
@@ -238,7 +254,7 @@ class JobManager:
                         except SoldOutError:
                             job.log("reserve race lost (sold out)")
                         except KorailError as e:
-                            job.log(f"reserve error: {e}")
+                            job.log(f"reserve error: {_safe_err(e)}")
                         else:
                             job._reservation = res
                             job.reservation_summary = str(res)
@@ -266,15 +282,17 @@ class JobManager:
                     last_ok = time.monotonic()
                     rc.on_success()
                 except Exception as e:
-                    job.log(f"재로그인 실패: {e}")
+                    job.log(f"재로그인 실패: {_safe_err(e)}")
             except KorailError as e:
-                msg = str(e)
+                msg = _safe_err(e)
                 if any(p in msg for p in ("MACRO", "원활한 서비스", "최신 버전")):
                     next_sleep = _handle_antibot(msg)
                 else:
                     job.log(f"korail error: {msg[:120]}")
             except Exception as e:
-                job.log(f"poll error: {type(e).__name__}: {e}")
+                # str(e)가 비문자열 msg를 감싼 예외에서 TypeError를 던져 스레드가
+                # 죽는 것을 막는다(SRT 워커와 동일 가드).
+                job.log(f"poll error: {_safe_err(e)}")
 
             # 정상 검색이 너무 오래 끊기면 세션이 꼬인 것 → 강제로 새 세션
             if next_sleep is None and time.monotonic() - last_ok > STALL_LIMIT:
@@ -286,7 +304,7 @@ class JobManager:
                     last_ok = time.monotonic()
                     rc.on_success()
                 except Exception as e:
-                    job.log(f"강제 재로그인 실패: {e}")
+                    job.log(f"강제 재로그인 실패: {_safe_err(e)}")
 
             sleep_for = next_sleep if next_sleep is not None else random.uniform(MIN_INTERVAL, MAX_INTERVAL)
             job.log(f"sleep {sleep_for:.1f}s")
@@ -338,8 +356,8 @@ class JobManager:
             )
         except Exception as e:
             job.status = JobStatus.ERROR
-            job.error = f"pay error: {e}"
-            job.log(f"ERROR: pay error: {e}")
+            job.error = f"pay error: {_safe_err(e)}"
+            job.log(f"ERROR: pay error: {_safe_err(e)}")
             return
         if ok:
             job.status = JobStatus.PAID
