@@ -383,14 +383,12 @@ function makeService(opts) {
       const cardLine = (hasAlwaysCard || s.has_card)
         ? `카드: <code>${s.card_masked || ("****" + s.card_last4)}</code> (할부 ${s.card_installment})`
         : `<span style="color:#888">카드 미저장 (수동 모드만 가능)</span>`;
-      // SRT card test is permanently disabled — server returns the wrong
-      // PNR for refund lookup so auto-refund cannot be made safe.
-      // KTX card test stays enabled (4-layer safety verified).
-      const cardTestBtn = svc === "srt"
-        ? `<span class="compact" style="margin-left:8px;color:#888">카드 테스트는 SRT 서버 제약으로 비활성화됨 (수동 결제 검증 권장)</span>`
-        : (s.has_card
-            ? `<button id="${p('-btn-test-card')}" style="margin-left:4px">카드 테스트</button>`
-            : "");
+      // 카드 테스트 버튼: SRT는 카드 필수라 항상, KTX는 카드 저장 시에만.
+      // SRT는 자동 환불이 실패할 수 있어(서버 제약) confirm에서 별도 경고한다.
+      const hasCard = svc === "ktx" ? s.has_card : true;
+      const cardTestBtn = hasCard
+        ? `<button id="${p('-btn-test-card')}" style="margin-left:4px">카드 테스트</button>`
+        : "";
       $(p("-config-status")).innerHTML =
         `✔ 저장됨 — ${idLabel}: <code>${s.id}</code><br>${cardLine}
          <button id="${p('-btn-edit-config')}" style="margin-left:8px">수정</button>
@@ -419,15 +417,21 @@ function makeService(opts) {
       if (cardBtn) {
         const route = svc === "srt" ? "김천(구미) → 동대구" : "서울 → 광명";
         cardBtn.onclick = async () => {
+          const srtWarn = svc === "srt"
+            ? `\n⚠ SRT 주의: 서버 제약으로 자동 환불이 실패할 수 있습니다.\n` +
+              `  그 경우 결제만 되고, 화면에 표시되는 PNR을 SRT 앱에서\n` +
+              `  직접 환불해야 합니다 (안전장치가 '남의 표 환불'은 차단함).\n`
+            : "";
           const msg =
             `⚠ 카드 테스트 안내\n\n` +
             `${route} 25일 뒤 평일 05:30 이후 첫차를 실제로:\n` +
-            `  ① 예약\n  ② 카드로 결제\n  ③ 즉시 자동 취소\n\n` +
+            `  ① 예약\n  ② 카드로 결제\n  ③ 즉시 자동 환불(취소)\n\n` +
             `목적: 저장된 카드가 실제로 결제 가능한지 확인.\n\n` +
             `※ KTX/SRT 예매는 출발 1개월 전부터 가능 → 어떤 표를 잡아도\n` +
             `  취소 위약금 약 400원이 카드에서 빠져나갑니다 (테스트 1회당).\n` +
-            `※ 결제 금액은 1~3 영업일 내 카드사 정책에 따라 환불됩니다.\n\n` +
-            `진행할까요?`;
+            `※ 결제 금액은 1~3 영업일 내 카드사 정책에 따라 환불됩니다.\n` +
+            srtWarn +
+            `\n진행할까요?`;
           if (!confirm(msg)) return;
           const r = $(p("-login-result"));
           r.innerHTML = "<span style='color:#888'>카드 테스트 중... (~10초)</span>";

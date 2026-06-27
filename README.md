@@ -33,8 +33,9 @@ curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-rail-macro/main/instal
 - 자격증명/잡 모두 SRT·KTX 별도 관리 (Keychain 항목 분리)
 
 ### 카드 테스트
-- **KTX**: 활성. 서울→광명 25일 뒤 평일 첫차 reserve→pay→refund. 4겹 안전장치 (snapshot · PNR 일치 · route/date 검증 · post-audit). 위약금 약 400원/회.
-- **SRT**: 비활성. SRT 서버의 reserve_info endpoint가 referer를 무시하고 다른 결제완료 표 정보를 반환하는 설계라, 자동 환불을 안전하게 못 함. SRT 카드 결제 검증은 SRT 앱에서 수동으로.
+둘 다 25일 뒤 평일 첫차를 reserve→pay→refund 하며, 4겹 안전장치 (snapshot · PNR 일치 · route/date 검증 · post-audit)로 **남의 표 환불을 차단**한다. 위약금 약 400원/회.
+- **KTX**: 활성. 서울→광명. 자동 환불 신뢰성 높음.
+- **SRT**: 활성(주의). 김천(구미)→동대구. SRT `reserve_info`가 referer를 무시하고 다른 표를 돌려줄 수 있어 **자동 환불이 실패할 수 있음** — 그 경우 결제만 되고, 화면의 PNR을 SRT 앱에서 직접 환불해야 한다(안전장치가 잘못된 표 환불은 막음). 같은 카드를 KTX로 검증하면 더 안전.
 
 ## 기존 SRT/KTX 단독 사용자
 

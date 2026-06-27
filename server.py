@@ -159,15 +159,25 @@ def srt_config_test():
 
 @srt_router.post("/config/card-test")
 def srt_card_test():
-    raise HTTPException(
-        status_code=501,
-        detail=(
-            "SRT 카드 테스트는 영구 비활성화됨. "
-            "SRT 서버의 reserve_info endpoint가 referer를 무시하고 항상 "
-            "다른 결제완료 표 정보를 반환하는 설계라, 자동 환불을 안전하게 "
-            "구현할 수 없음. 결제 카드 검증은 SRT 앱에서 수동으로 진행하세요."
-        ),
-    )
+    c = config.srt.load()
+    if not c:
+        raise HTTPException(status_code=404, detail="not configured")
+    if not c.card_number:
+        raise HTTPException(status_code=400, detail="카드 정보가 없습니다")
+    # SRT는 reserve_info가 referer를 무시해 다른 표를 돌려줄 수 있어, 환불 전
+    # PNR/노선/날짜 일치를 검증하고 보호표가 오면 즉시 중단한다(card_test.py의
+    # 4겹 안전장치). 그래도 자동 환불이 실패하면 결제만 되고 수동 환불이 필요할
+    # 수 있어 summary/steps에 그대로 노출한다.
+    try:
+        r = card_test.srt_card_test()
+    except Exception as e:
+        detail = _safe_err(e)
+        return {
+            "ok": False,
+            "summary": f"카드 테스트 내부 오류: {detail}",
+            "steps": [{"name": "error", "ok": False, "detail": detail}],
+        }
+    return {"ok": r.ok, "summary": r.summary, "steps": r.steps}
 
 
 @srt_router.post("/search")
