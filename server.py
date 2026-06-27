@@ -36,6 +36,26 @@ def index():
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 
 
+def _normalize_expire(raw: str) -> tuple[str, bool]:
+    """카드 유효기간을 YYMM으로 정규화한다.
+
+    SRT(SRTrain)·KTX(srtgo) 둘 다 결제 시 YYMM(연-월)을 요구하는데, 사용자가
+    카드 표면의 MM/YY 순서대로 MMYY로 넣는 실수가 잦아 결제가 실패한다.
+    뒤 2자리가 월(01~12)이 아니고 앞 2자리가 월이면 명백한 MMYY이므로 두 쪽을
+    뒤집어 YYMM으로 고친다. 앞뒤 둘 다 월로 해석 가능한 애매한 값은 건드리지 않는다.
+    반환: (정규화값, 교정여부)
+    """
+    d = "".join(ch for ch in (raw or "") if ch.isdigit())
+    if len(d) != 4:
+        return raw, False
+    front, back = d[:2], d[2:]
+    front_is_month = 1 <= int(front) <= 12
+    back_is_month = 1 <= int(back) <= 12
+    if front_is_month and not back_is_month:   # 명백한 MMYY → 뒤집어 YYMM
+        return back + front, True
+    return d, False
+
+
 # ─── SRT routes ─────────────────────────────────────────────────────────
 srt_router = APIRouter(prefix="/api/srt")
 
@@ -76,6 +96,7 @@ def srt_config_status():
 
 @srt_router.post("/config")
 def srt_config_save(body: SRTCredsIn):
+    expire, expire_corrected = _normalize_expire(body.card_expire)
     try:
         creds = config.SRTCredentials(
             srt_id=body.srt_id,
@@ -83,7 +104,7 @@ def srt_config_save(body: SRTCredsIn):
             card_number=body.card_number.replace("-", "").replace(" ", ""),
             card_password=body.card_password,
             card_validation=body.card_validation,
-            card_expire=body.card_expire,
+            card_expire=expire,
             card_type=body.card_type,
             card_installment=body.card_installment,
         )
@@ -92,6 +113,7 @@ def srt_config_save(body: SRTCredsIn):
         raise HTTPException(status_code=422, detail="; ".join(msgs))
     config.srt.save(creds)
     out = config.srt.public_status()
+    out["expire_corrected"], out["card_expire"] = expire_corrected, expire
     out["login_ok"], out["login_error"] = _srt_login_test(creds)
     return out
 
@@ -272,6 +294,7 @@ def ktx_config_status():
 
 @ktx_router.post("/config")
 def ktx_config_save(body: KTXCredsIn):
+    expire, expire_corrected = _normalize_expire(body.card_expire)
     try:
         creds = config.KTXCredentials(
             ktx_id=body.ktx_id,
@@ -279,7 +302,7 @@ def ktx_config_save(body: KTXCredsIn):
             card_number=body.card_number.replace("-", "").replace(" ", ""),
             card_password=body.card_password,
             card_validation=body.card_validation,
-            card_expire=body.card_expire,
+            card_expire=expire,
             card_installment=body.card_installment,
         )
     except ValidationError as e:
@@ -287,6 +310,7 @@ def ktx_config_save(body: KTXCredsIn):
         raise HTTPException(status_code=422, detail="; ".join(msgs))
     config.ktx.save(creds)
     out = config.ktx.public_status()
+    out["expire_corrected"], out["card_expire"] = expire_corrected, expire
     out["login_ok"], out["login_error"], out["login_name"] = _ktx_login_test(creds)
     return out
 

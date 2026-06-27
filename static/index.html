@@ -86,6 +86,7 @@
         <div class="row"><label>카드비번 앞2자리</label><input id="srt-c-card-pw" type="password" maxlength="2"></div>
         <div class="row"><label>생년월일/사업자</label><input id="srt-c-card-val" type="text" placeholder="YYMMDD 또는 사업자번호"></div>
         <div class="row"><label>카드유효기간</label><input id="srt-c-card-exp" type="text" placeholder="YYMM" maxlength="4"></div>
+        <div class="compact">YYMM 순서(연·월). 예: 2030년 12월 → <strong>3012</strong>. 카드의 MM/YY대로 넣어도 자동 교정됨.</div>
         <div class="row"><label>카드타입</label>
           <select id="srt-c-card-type"><option value="J">개인 (J)</option><option value="S">법인 (S)</option></select></div>
         <div class="row"><label>할부</label>
@@ -160,6 +161,7 @@
         <div class="row"><label>카드비번 앞2자리</label><input id="ktx-c-card-pw" type="password" maxlength="2"></div>
         <div class="row"><label>생년월일</label><input id="ktx-c-card-val" type="text" placeholder="YYMMDD" maxlength="6"></div>
         <div class="row"><label>카드유효기간</label><input id="ktx-c-card-exp" type="text" placeholder="YYMM" maxlength="4"></div>
+        <div class="compact">YYMM 순서(연·월). 예: 2030년 12월 → <strong>3012</strong>. 카드의 MM/YY대로 넣어도 자동 교정됨.</div>
         <div class="row"><label>할부</label>
           <select id="ktx-c-card-inst">
             <option value="0">일시불</option><option value="2">2개월</option><option value="3">3개월</option>
@@ -471,13 +473,17 @@ function makeService(opts) {
         ? ["srt-c-pw","srt-c-card-pw"]
         : ["ktx-c-pw","ktx-c-card-pw"];
       fields.forEach(i => $(i).value = "");
+      if (r.card_expire) $(svc + "-c-card-exp").value = r.card_expire;
       await refreshConfig();
+      // 유효기간을 MMYY로 잘못 넣었으면 서버가 YYMM으로 자동 교정함 → 알림
+      const corr = r.expire_corrected
+        ? ` · ⚠유효기간 MMYY→YYMM 자동교정(${r.card_expire})` : "";
       if (r.login_ok) {
-        toast(`✓ 저장 + 로그인 성공${r.login_name ? " (" + r.login_name + ")" : ""}`, 2400);
+        toast(`✓ 저장 + 로그인 성공${r.login_name ? " (" + r.login_name + ")" : ""}${corr}`, corr ? 4500 : 2400);
       } else if (r.login_ok === false) {
-        toast(`⚠ 저장됨, 그러나 로그인 실패: ${r.login_error || ""}`, 4000);
+        toast(`⚠ 저장됨, 그러나 로그인 실패: ${r.login_error || ""}${corr}`, 4500);
       } else {
-        toast(`✓ ${svc.toUpperCase()} 자격증명 저장됨`);
+        toast(`✓ ${svc.toUpperCase()} 자격증명 저장됨${corr}`, corr ? 4500 : 1800);
       }
     } catch (e) { alert("저장 실패: " + e.message); }
   };
