@@ -17,9 +17,16 @@ import types
 from SRT.errors import SRTNetFunnelError
 from srtgo.ktx import KorailError
 
+import tempfile
+from pathlib import Path
+
+import jobstore
 import recovery
 import srt_worker
 import ktx_worker
+
+# 테스트가 실제 ~/.k-rail-macro/jobs.json 을 건드리지 않도록 격리
+jobstore.PATH = Path(tempfile.mkdtemp()) / "jobs.json"
 
 
 # ── 1. 백오프 수학 / 에스컬레이션 (순수) ────────────────────────────────
@@ -70,6 +77,9 @@ class FakeSRT:
         FakeSRT.created += 1
         self._session = _FakeSession()
         self.netfunnel_helper = _FakeNF()
+
+    def login(self, *a, **k):
+        return True
 
     def search_train(self, *a, **k):
         if FakeSRT.fail_remaining > 0:

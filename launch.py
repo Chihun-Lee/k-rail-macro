@@ -60,13 +60,19 @@ if __name__ == "__main__":
         sys.exit(0)
 
     threading.Timer(1.5, _open_browser).start()
-    try:
-        uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")
-    except KeyboardInterrupt:
-        print("\n종료합니다.")
-    except Exception:
-        print("\n[오류] 서버가 예기치 않게 종료됐습니다. 아래 내용을 캡처해 보내주세요:\n")
-        traceback.print_exc()
-        _pause()
-        sys.exit(1)
+    # 서버가 어떤 이유로든 죽어도 자동 재시작해 표잡기를 계속한다.
+    # (활성 잡은 jobs.json에서 자동 복원) 종료는 Ctrl+C 또는 창 닫기.
+    while True:
+        try:
+            uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")
+            print("\n서버가 종료됐습니다.")
+            break
+        except KeyboardInterrupt:
+            print("\n종료합니다.")
+            break
+        except Exception:
+            print("\n[오류] 서버가 예기치 않게 종료됐습니다 → 2초 후 자동 재시작:\n")
+            traceback.print_exc()
+            import time
+            time.sleep(2)
     _pause()

@@ -28,6 +28,35 @@ ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 app = FastAPI(title="K-Rail Macro (SRT + KTX, 개인용)")
 
 
+def _prevent_mac_sleep() -> None:
+    """맥이 유휴 절전에 들어가 폴링이 통째로 멈추는 것을 방지.
+
+    caffeinate -w 는 이 서버 프로세스가 살아있는 동안만 idle sleep을 억제하고
+    서버가 죽으면 스스로 종료된다. (뚜껑을 닫는 강제 절전까지 막지는 못한다.)
+    """
+    if sys.platform != "darwin":
+        return
+    import os
+    import subprocess
+    try:
+        subprocess.Popen(
+            ["caffeinate", "-i", "-w", str(os.getpid())],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    _prevent_mac_sleep()
+    # 이전 프로세스가 죽으며 남긴 활성 잡을 자동 복원 — 표 잡을 때까지 계속.
+    n_srt = srt_worker.manager.restore()
+    n_ktx = ktx_worker.manager.restore()
+    if n_srt or n_ktx:
+        print(f"[k-rail] 이전 세션 작업 자동 복원: SRT {n_srt}건, KTX {n_ktx}건")
+
+
 @app.get("/")
 def index():
     return FileResponse(ROOT / "static" / "index.html")

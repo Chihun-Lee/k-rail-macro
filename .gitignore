@@ -4,6 +4,7 @@ __pycache__/
 venv/
 *.env
 secrets/
+jobs.json
 *.log
 .DS_Store
 .idea/

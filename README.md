@@ -28,6 +28,12 @@ curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-rail-macro/main/instal
 - anti-bot 자동 회복:
   - SRT NetFunnel "Wrong Server ID" → 캐시 무효화 + 클라이언트 재생성
   - KTX MACRO ERROR → 클라이언트 재생성 (Dynapath 우회 토큰 자동 갱신)
+- **표 잡을 때까지 안 멈춤** (세션 중단 방지 4중 장치):
+  - 로그인 실패·인터넷 끊김 → 백오프 후 무한 재시도 (ERROR로 죽지 않음)
+  - 감시자(watchdog)가 30초마다 검사 → 죽거나 멈춘 폴링 스레드 자동 재시작
+  - 활성 잡을 `~/.k-rail-macro/jobs.json`에 저장 → 서버가 죽어도 재시작 시 자동 복원
+  - macOS: 서버 크래시 시 2초 후 자동 재기동(`run_supervised.sh`) + 유휴 절전 방지(`caffeinate`)
+  - 수동결제 확인 시간초과(~9분)로 예약이 자동취소되면 → 폴링 자동 재개
 - KTX는 KTX/ITX-새마을/무궁화호/누리로/ITX-청춘 모두 지원
 - 토스트 알림 + 실시간 로그
 - 자격증명/잡 모두 SRT·KTX 별도 관리 (Keychain 항목 분리)
@@ -66,6 +72,8 @@ python server.py
 | `ktx_worker.py` | KTX polling/reserve/pay (srtgo) |
 | `ktx_korail.py` | srtgo Korail + Dynapath bypass |
 | `config.py` | 두 namespace (`config.srt`, `config.ktx`) Keychain 저장 |
+| `jobstore.py` | 활성 잡 디스크 저장/복원 (서버 재시작 시 자동 재개) |
+| `run_supervised.sh` | macOS 서버 감시 루프 (죽으면 자동 재시작) |
 | `static/index.html` | 탭 UI, 두 서비스 공통 JS |
 | `install.sh` | 친구용 원클릭 설치 |
 

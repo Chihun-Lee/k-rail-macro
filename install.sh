@@ -178,6 +178,9 @@ PORT=$PORT
 LOG="/tmp/k-rail-macro.log"
 ARCH_PREFIX="$ARCH_PREFIX"
 
+# 재실행 시 기존 감시 루프까지 깨끗이 정리(그냥 서버만 죽이면 옛 루프가 되살림)
+touch /tmp/k-rail-macro.stop
+pkill -f "\$INSTALL_DIR/run_supervised.sh" 2>/dev/null
 EXISTING=\$(lsof -ti tcp:\$PORT -sTCP:LISTEN 2>/dev/null)
 if [ -n "\$EXISTING" ]; then
   kill \$EXISTING 2>/dev/null
@@ -185,7 +188,9 @@ if [ -n "\$EXISTING" ]; then
 fi
 
 cd "\$INSTALL_DIR"
-nohup \$ARCH_PREFIX "\$INSTALL_DIR/venv/bin/python" server.py > "\$LOG" 2>&1 &
+: > "\$LOG"
+# 감시 루프로 실행: 서버가 죽어도 자동 재시작 + 잡은 jobs.json에서 자동 복원
+nohup "\$INSTALL_DIR/run_supervised.sh" "\$ARCH_PREFIX" > /dev/null 2>&1 &
 
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
   if curl -fsS http://127.0.0.1:\$PORT/api/srt/config/status > /dev/null 2>&1; then
@@ -220,6 +225,8 @@ EOF
 cat > "$QUIT_APP/Contents/MacOS/quit" <<EOF
 #!/bin/bash
 PORT=$PORT
+# 감시 루프가 서버를 되살리지 않도록 정지 깃발부터 세운다
+touch /tmp/k-rail-macro.stop
 PIDS=\$(lsof -ti tcp:\$PORT -sTCP:LISTEN 2>/dev/null)
 if [ -n "\$PIDS" ]; then
   kill \$PIDS

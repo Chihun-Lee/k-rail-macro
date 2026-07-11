@@ -8,7 +8,7 @@ import random
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Deque, Optional
@@ -24,6 +24,7 @@ from srtgo.ktx import (
 )
 
 import config
+import jobstore
 from ktx_korail import PatchedKorail
 from recovery import RecoveryController
 
@@ -35,6 +36,11 @@ SESSION_MAX_AGE = 600.0
 # 정상 검색이 이 시간 이상 끊기면 세션이 꼬인 것으로 보고 강제로 새 세션을 만든다.
 STALL_LIMIT = 240.0
 LOG_LIMIT = 500
+# 감시자(watchdog): 활성 잡의 스레드가 죽거나 멈추면 자동 재시작한다.
+WATCHDOG_PERIOD = 30.0
+# 최대 정상 sleep(90s) + HTTP 타임아웃(25s) 몇 번을 크게 웃도는 값 — 이보다
+# 오래 심장박동이 없으면 스레드가 되살아날 수 없는 상태로 멈춘 것으로 본다.
+HEARTBEAT_STALE = 480.0
 
 
 def _safe_err(e: BaseException) -> str:
@@ -110,13 +116,18 @@ class Job:
     payment_deadline: Optional[str] = None
     error: Optional[str] = None
     logs: Deque[str] = field(default_factory=lambda: deque(maxlen=LOG_LIMIT))
+    last_beat: float = field(default_factory=time.monotonic)
     _stop: threading.Event = field(default_factory=threading.Event)
     _thread: Optional[threading.Thread] = None
+    _gen: int = 0  # 감시자 재시작 세대. 옛 스레드는 세대가 바뀌면 스스로 종료.
     _reservation: object = None
     _pay_event: threading.Event = field(default_factory=threading.Event)
 
     def log(self, msg: str) -> None:
         self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+    def beat(self) -> None:
+        self.last_beat = time.monotonic()
 
 
 class JobManager:
@@ -124,6 +135,7 @@ class JobManager:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
         self._counter = 0
+        self._watchdog: Optional[threading.Thread] = None
 
     def list(self) -> list[Job]:
         with self._lock:
@@ -132,15 +144,16 @@ class JobManager:
     def get(self, job_id: str) -> Optional[Job]:
         return self._jobs.get(job_id)
 
-    def create(self, spec: JobSpec) -> Job:
+    def create(self, spec: JobSpec, persist: bool = True) -> Job:
         with self._lock:
             self._counter += 1
             jid = f"k{self._counter}"
         job = Job(id=jid, spec=spec)
         self._jobs[jid] = job
-        t = threading.Thread(target=self._run, args=(job,), daemon=True, name=f"ktx-{jid}")
-        job._thread = t
-        t.start()
+        self._ensure_watchdog()
+        self._spawn(job)
+        if persist:
+            self._persist()
         return job
 
     def stop(self, job_id: str) -> bool:
@@ -149,7 +162,76 @@ class JobManager:
             return False
         job._stop.set()
         job._pay_event.set()
+        self._persist()
         return True
+
+    def _spawn(self, job: Job) -> None:
+        job._gen += 1
+        job.beat()
+        t = threading.Thread(
+            target=self._run, args=(job, job._gen), daemon=True,
+            name=f"ktx-{job.id}-g{job._gen}",
+        )
+        job._thread = t
+        t.start()
+
+    def _ensure_watchdog(self) -> None:
+        if self._watchdog is not None and self._watchdog.is_alive():
+            return
+        self._watchdog = threading.Thread(target=self._watch, daemon=True, name="ktx-watchdog")
+        self._watchdog.start()
+
+    def _watch(self) -> None:
+        """스레드가 죽었거나(예외) 멈춘(심장박동 정지) 활성 잡을 자동 재시작한다.
+
+        세대 토큰(_gen)을 올리고 새 스레드를 띄우면 옛 스레드는 다음 루프에서
+        세대 불일치를 보고 스스로 빠진다. 진짜로 시스템콜에 갇힌 스레드는 죽일
+        수 없지만, 모든 HTTP 호출에 타임아웃이 강제돼 있어 결국 풀려나 종료된다.
+        """
+        while True:
+            time.sleep(WATCHDOG_PERIOD)
+            for job in self.list():
+                if job._stop.is_set() or job.status not in (JobStatus.PENDING, JobStatus.POLLING):
+                    continue
+                dead = job._thread is None or not job._thread.is_alive()
+                stuck = time.monotonic() - job.last_beat > HEARTBEAT_STALE
+                if dead or stuck:
+                    job.recoveries += 1
+                    job.log(f"감시자: {'스레드 사망' if dead else '응답 없음(멈춤)'} 감지 → 자동 재시작")
+                    self._spawn(job)
+
+    def _persist(self) -> None:
+        active = [
+            asdict(j.spec) for j in self.list()
+            if not j._stop.is_set()
+            and j.status in (JobStatus.PENDING, JobStatus.POLLING, JobStatus.RESERVED)
+        ]
+        jobstore.save("ktx", active)
+
+    def restore(self) -> int:
+        """이전 서버 프로세스가 남긴 활성 잡을 되살린다(서버 시작 시).
+
+        같은 프로세스에서 서버가 재기동돼 이미 동일 잡이 돌고 있으면
+        건너뛴다(중복 폴링/중복 예매 방지).
+        """
+        existing = [
+            asdict(j.spec) for j in self.list()
+            if not j._stop.is_set()
+            and j.status in (JobStatus.PENDING, JobStatus.POLLING, JobStatus.RESERVED)
+        ]
+        n = 0
+        for d in jobstore.load("ktx"):
+            if d in existing:
+                continue
+            try:
+                d["pay_mode"] = PayMode(d["pay_mode"])
+                job = self.create(JobSpec(**d), persist=False)
+            except Exception:
+                continue
+            job.log("서버 재시작 감지 → 저장된 작업 자동 복원")
+            n += 1
+        self._persist()
+        return n
 
     def confirm_pay(self, job_id: str) -> bool:
         job = self._jobs.get(job_id)
@@ -158,31 +240,63 @@ class JobManager:
         job._pay_event.set()
         return True
 
-    def _run(self, job: Job) -> None:
+    def _run(self, job: Job, gen: int) -> None:
         creds = config.ktx.load()
         if not creds:
             job.status = JobStatus.ERROR
             job.error = "credentials not configured"
             job.log("ERROR: credentials missing")
+            self._persist()
             return
+
+        def active() -> bool:
+            return not job._stop.is_set() and job._gen == gen
+
+        # 어떤 예외로 폴링 루프가 깨져도 표를 잡기 전에는 스레드가 죽지 않는다.
+        # 종료는 사용자 정지, 결제 흐름 종료(성공/오류), 감시자 교체뿐이다.
+        while active():
+            try:
+                if self._poll_loop(job, gen, creds, active):
+                    break
+            except Exception as e:
+                job.recoveries += 1
+                job.log(f"워커 오류 → 15s 후 자동 재시작: {_safe_err(e)}")
+                job._stop.wait(15.0)
+
+        if job._gen != gen:
+            return  # 감시자가 새 스레드로 교체함 — 상태는 새 스레드가 관리
+        if job.status in (JobStatus.PENDING, JobStatus.POLLING):
+            job.status = JobStatus.STOPPED
+            job.log("stopped")
+        self._persist()
+
+    def _poll_loop(self, job: Job, gen: int, creds: config.KTXCredentials, active) -> bool:
+        """폴링 본체. True면 작업 종료(결제 흐름 완료/정지), False면 재시작 대상."""
 
         def _new_client() -> PatchedKorail:
             c = PatchedKorail(creds.ktx_id, creds.ktx_password, auto_login=False)
+            # 로그인 호출에도 타임아웃이 걸리도록 로그인 전에 패치한다(없으면
+            # 인터넷 불안정 시 로그인에서 스레드가 영원히 멈춤). 폴링 루프의
+            # 모든 HTTP 호출에도 같은 타임아웃이 적용된다.
+            _force_session_timeout(c._session, 25)
             if not c.login():
                 raise RuntimeError("login returned False")
-            # 폴링 루프의 모든 HTTP 호출에 타임아웃 강제 (없으면 서버가 연결을
-            # 물고 있을 때 search_train 무한 대기 → 스레드 멈춤).
-            _force_session_timeout(c._session, 25)
             return c
 
-        try:
-            client = _new_client()
-            session_started = time.monotonic()
-        except Exception as e:
-            job.status = JobStatus.ERROR
-            job.error = f"login failed: {_safe_err(e)}"
-            job.log(f"login failed: {_safe_err(e)}")
-            return
+        # 로그인은 실패해도 포기하지 않는다(인터넷 불안정 대비, 표 잡을 때까지).
+        login_rc = RecoveryController(base=5.0, cap=120.0, fresh_login_every=10 ** 9)
+        client: Optional[PatchedKorail] = None
+        while active() and client is None:
+            job.beat()
+            try:
+                client = _new_client()
+            except Exception as e:
+                rec = login_rc.on_error()
+                job.log(f"로그인 실패 #{rec.streak} → {rec.sleep:.0f}s 후 재시도: {_safe_err(e)}")
+                job._stop.wait(rec.sleep)
+        if client is None:
+            return False  # 정지/교체 요청됨 → 상위에서 정리
+        session_started = time.monotonic()
 
         job.log(
             f"login ok ({getattr(client, 'name', creds.ktx_id)}); "
@@ -218,7 +332,8 @@ class JobManager:
                 )
             return rec.sleep
 
-        while not job._stop.is_set():
+        while active():
+            job.beat()
             job.attempts += 1
             next_sleep: Optional[float] = None
 
@@ -268,8 +383,16 @@ class JobManager:
                             job.status = JobStatus.RESERVED
                             job.log(f"RESERVED: {res}")
                             job.log(f"deadline: {job.payment_deadline}")
-                            self._handle_payment(client, job, creds)
-                            return
+                            if self._handle_payment(client, job, creds):
+                                return True
+                            # 결제확인 시간초과 → 코레일이 예약을 자동취소하므로
+                            # 처음 상태로 되돌려 표잡기를 재개한다(잡을 때까지).
+                            job._pay_event.clear()
+                            job._reservation = None
+                            job.reservation_summary = None
+                            job.reservation_id = None
+                            job.payment_deadline = None
+                            job.status = JobStatus.POLLING
             except NoResultsError:
                 job.log(f"#{job.attempts} no results")
                 rc.on_success()
@@ -308,35 +431,34 @@ class JobManager:
 
             sleep_for = next_sleep if next_sleep is not None else random.uniform(MIN_INTERVAL, MAX_INTERVAL)
             job.log(f"sleep {sleep_for:.1f}s")
+            job.beat()
             if job._stop.wait(sleep_for):
                 break
 
-        if job.status == JobStatus.POLLING:
-            job.status = JobStatus.STOPPED
-            job.log("stopped")
+        return False  # 정지/교체 요청 → 상위에서 정리
 
-    def _handle_payment(self, client: PatchedKorail, job: Job, creds: config.KTXCredentials) -> None:
+    def _handle_payment(self, client: PatchedKorail, job: Job, creds: config.KTXCredentials) -> bool:
+        """결제 흐름. True=작업 종료(결제/오류/정지), False=폴링 재개(확인 시간초과)."""
         if job.spec.pay_mode == PayMode.MANUAL:
             job.log("manual mode: waiting for user '결제 진행' (~9min)")
             if job._pay_event.wait(timeout=540):
                 if job._stop.is_set():
                     job.log("stopped before payment")
-                    return
+                    return True
                 job.log("user confirmed → charging card")
                 self._pay(client, job, creds)
-            else:
-                job.status = JobStatus.ERROR
-                job.error = "payment confirmation timeout"
-                job.log("ERROR: confirm timeout (~9min); reservation likely auto-cancelled")
-            return
+                return True
+            job.log("결제확인 시간초과(~9분) → 예약은 자동취소됨. 표잡기 폴링 재개")
+            return False
 
         if not creds.card_number:
             job.status = JobStatus.ERROR
             job.error = "auto pay requested but card not configured"
             job.log("ERROR: auto pay requires card info")
-            return
+            return True
         job.log("auto-pay → charging card")
         self._pay(client, job, creds)
+        return True
 
     def _pay(self, client: PatchedKorail, job: Job, creds: config.KTXCredentials) -> None:
         if not creds.card_number:
