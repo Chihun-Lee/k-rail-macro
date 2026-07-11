@@ -31,8 +31,9 @@ app = FastAPI(title="K-Rail Macro (SRT + KTX, 개인용)")
 def _prevent_mac_sleep() -> None:
     """맥이 유휴 절전에 들어가 폴링이 통째로 멈추는 것을 방지.
 
-    caffeinate -w 는 이 서버 프로세스가 살아있는 동안만 idle sleep을 억제하고
-    서버가 죽으면 스스로 종료된다. (뚜껑을 닫는 강제 절전까지 막지는 못한다.)
+    caffeinate -w 는 이 서버 프로세스가 살아있는 동안만 유휴/시스템 절전을
+    억제하고 서버가 죽으면 스스로 종료된다. (뚜껑 닫힘 절전은 caffeinate로
+    막을 수 없다 → 아래 lid guard가 pmset disablesleep으로 처리.)
     """
     if sys.platform != "darwin":
         return
@@ -40,21 +41,77 @@ def _prevent_mac_sleep() -> None:
     import subprocess
     try:
         subprocess.Popen(
-            ["caffeinate", "-i", "-w", str(os.getpid())],
+            ["caffeinate", "-i", "-s", "-w", str(os.getpid())],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except Exception:
         pass
 
 
+def _any_active_jobs() -> bool:
+    for w in (srt_worker, ktx_worker):
+        for j in w.manager.list():
+            if not j._stop.is_set() and j.status in (
+                w.JobStatus.PENDING, w.JobStatus.POLLING, w.JobStatus.RESERVED,
+            ):
+                return True
+    return False
+
+
+def _set_disablesleep(on: bool) -> bool:
+    import subprocess
+    r = subprocess.run(
+        ["sudo", "-n", "/usr/bin/pmset", "-a", "disablesleep", "1" if on else "0"],
+        capture_output=True, timeout=10,
+    )
+    return r.returncode == 0
+
+
+def _lid_guard_loop() -> None:
+    """뚜껑을 닫아도 활성 잡이 도는 동안은 맥이 잠들지 않게 한다.
+
+    macOS에서 뚜껑 닫힘 절전을 막는 방법은 pmset disablesleep(root)뿐이다.
+    setup_lid_mode.sh 로 passwordless sudo 규칙을 설치한 경우에만 동작하며,
+    없으면 안내 한 번 남기고 건너뛴다. 배터리/발열을 아끼려고 '활성 잡이
+    있는 동안만' 켜고 잡이 끝나면 자동으로 끈다.
+    """
+    import atexit
+    import time as _time
+
+    state = {"on": False}
+
+    def _off_at_exit() -> None:
+        if state["on"]:
+            _set_disablesleep(False)
+
+    atexit.register(_off_at_exit)
+
+    warned = False
+    first = True  # 크래시 후 재시작이면 실제 pmset 값이 남아있을 수 있어 1회 강제 동기화
+    while True:
+        want = _any_active_jobs()
+        if first or want != state["on"]:
+            first = False
+            if _set_disablesleep(want):
+                state["on"] = want
+                print(f"[k-rail] 뚜껑 닫힘 절전 방지 {'ON (잡 실행 중)' if want else 'OFF (활성 잡 없음)'}", flush=True)
+            elif not warned:
+                warned = True
+                print("[k-rail] 뚜껑 닫힘 절전 방지 불가 — setup_lid_mode.sh 를 한 번 실행하면 활성화됩니다", flush=True)
+        _time.sleep(15)
+
+
 @app.on_event("startup")
 def _on_startup() -> None:
     _prevent_mac_sleep()
+    if sys.platform == "darwin":
+        import threading
+        threading.Thread(target=_lid_guard_loop, daemon=True, name="lid-guard").start()
     # 이전 프로세스가 죽으며 남긴 활성 잡을 자동 복원 — 표 잡을 때까지 계속.
     n_srt = srt_worker.manager.restore()
     n_ktx = ktx_worker.manager.restore()
     if n_srt or n_ktx:
-        print(f"[k-rail] 이전 세션 작업 자동 복원: SRT {n_srt}건, KTX {n_ktx}건")
+        print(f"[k-rail] 이전 세션 작업 자동 복원: SRT {n_srt}건, KTX {n_ktx}건", flush=True)
 
 
 @app.get("/")

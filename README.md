@@ -34,6 +34,11 @@ curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-rail-macro/main/instal
   - 활성 잡을 `~/.k-rail-macro/jobs.json`에 저장 → 서버가 죽어도 재시작 시 자동 복원
   - macOS: 서버 크래시 시 2초 후 자동 재기동(`run_supervised.sh`) + 유휴 절전 방지(`caffeinate`)
   - 수동결제 확인 시간초과(~9분)로 예약이 자동취소되면 → 폴링 자동 재개
+- **뚜껑 닫아도 계속** (macOS, 선택): `bash setup_lid_mode.sh` 를 한 번 실행하면
+  (관리자 비밀번호 1회) 이후 **활성 잡이 도는 동안만** `pmset disablesleep`을 자동으로
+  켜서 뚜껑을 닫아도 폴링이 계속된다. 잡이 없으면 자동으로 꺼져 평소 배터리엔 영향 없음.
+  ⚠ 잡 도는 중 뚜껑 닫은 채 가방에 넣으면 발열 주의. 해제:
+  `sudo rm /etc/sudoers.d/k-rail-pmset && sudo pmset -a disablesleep 0`
 - KTX는 KTX/ITX-새마을/무궁화호/누리로/ITX-청춘 모두 지원
 - 토스트 알림 + 실시간 로그
 - 자격증명/잡 모두 SRT·KTX 별도 관리 (Keychain 항목 분리)
@@ -74,6 +79,7 @@ python server.py
 | `config.py` | 두 namespace (`config.srt`, `config.ktx`) Keychain 저장 |
 | `jobstore.py` | 활성 잡 디스크 저장/복원 (서버 재시작 시 자동 재개) |
 | `run_supervised.sh` | macOS 서버 감시 루프 (죽으면 자동 재시작) |
+| `setup_lid_mode.sh` | 뚜껑 닫아도 잡 유지용 1회 설정 (pmset sudoers) |
 | `static/index.html` | 탭 UI, 두 서비스 공통 JS |
 | `install.sh` | 친구용 원클릭 설치 |
 
