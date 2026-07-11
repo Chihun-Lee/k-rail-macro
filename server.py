@@ -10,11 +10,12 @@ Listens on 127.0.0.1:8912 (separate from the standalone 8910/8911).
 from __future__ import annotations
 
 import sys
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
@@ -26,6 +27,28 @@ import ktx_worker
 # PyInstaller onefile로 묶이면 정적 파일은 임시 추출 경로(_MEIPASS)에 풀린다.
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 app = FastAPI(title="K-Rail Macro (SRT + KTX, 개인용)")
+
+# 원격(폰) 접속을 위해 K_RAIL_HOST=0.0.0.0 으로 바인딩하더라도, 계정·카드
+# UI가 회사망/공용망에 노출되지 않도록 허용 대역 밖 접근은 전부 차단한다.
+# 허용: 로컬호스트 + Tailscale 테일넷(CGNAT 100.64/10, ts IPv6) — WireGuard
+# 암호화 사설망이라 평문 HTTP여도 안전하다.
+_ALLOWED_NETS = (
+    ip_network("127.0.0.0/8"),
+    ip_network("::1/128"),
+    ip_network("100.64.0.0/10"),          # Tailscale IPv4
+    ip_network("fd7a:115c:a1e0::/48"),    # Tailscale IPv6
+)
+
+
+@app.middleware("http")
+async def _restrict_to_local_and_tailnet(request: Request, call_next):
+    try:
+        client = ip_address(request.client.host)
+    except Exception:
+        return PlainTextResponse("forbidden", status_code=403)
+    if not any(client in net for net in _ALLOWED_NETS):
+        return PlainTextResponse("forbidden", status_code=403)
+    return await call_next(request)
 
 
 def _prevent_mac_sleep() -> None:
@@ -555,5 +578,11 @@ app.include_router(ktx_router)
 
 
 if __name__ == "__main__":
+    import os
+
     import uvicorn
-    uvicorn.run("server:app", host="127.0.0.1", port=8912, reload=False)
+
+    # 기본은 로컬 전용. 폰(테일넷) 접속용 상주 세팅(setup_remote.sh)이
+    # K_RAIL_HOST=0.0.0.0 을 넣어주면 위 미들웨어가 접근 대역을 제한한다.
+    host = os.environ.get("K_RAIL_HOST", "127.0.0.1")
+    uvicorn.run("server:app", host=host, port=8912, reload=False)

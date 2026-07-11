@@ -48,6 +48,43 @@ curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-rail-macro/main/instal
 - **KTX**: 활성. 서울→광명. 자동 환불 신뢰성 높음.
 - **SRT**: 활성(주의). 김천(구미)→동대구. SRT `reserve_info`가 referer를 무시하고 다른 표를 돌려줄 수 있어 **자동 환불이 실패할 수 있음** — 그 경우 결제만 되고, 화면의 PNR을 SRT 앱에서 직접 환불해야 한다(안전장치가 잘못된 표 환불은 막음). 같은 카드를 KTX로 검증하면 더 안전.
 
+## 폰에서 쓰기 (원격 상주 세팅, macOS)
+
+맥에서 한 번 실행:
+
+```bash
+bash setup_remote.sh
+```
+
+이게 해주는 것:
+
+1. **launchd 상주** — 로그인하면 서버 자동 시작, 죽으면 launchd가 자동 재시작 (재부팅에도 살아남음. `run_supervised.sh` nohup 방식 대체)
+2. **테일넷 접속** — `K_RAIL_HOST=0.0.0.0` 바인딩 + 서버 미들웨어가 로컬호스트·Tailscale 대역(100.64/10) 외 접근을 전부 403 차단. 폰 브라우저(폰도 Tailscale ON)에서:
+
+   ```
+   http://<맥 테일스케일IP>:8912     # 맥에서 tailscale ip -4 로 확인
+   ```
+
+   Tailscale은 WireGuard 암호화 사설망이라 HTTP여도 안전하고, 회사망/공용망의 다른 기기는 접근이 차단된다.
+
+여기에 `setup_lid_mode.sh`(뚜껑 닫힘 방지)까지 하면: **뚜껑 닫힌 맥북을 그대로 두고, 폰 브라우저나 폰의 Claude 원격 세션에서 잡을 걸고 표를 잡는다.**
+
+폰 Claude 원격 세션에서 API로 직접 조작할 때:
+
+```bash
+# 잡 목록
+curl -s http://127.0.0.1:8912/api/srt/jobs
+# SRT 잡 등록 (예: 수서→부산 8/1 08시 이후, 수동결제)
+curl -s -X POST http://127.0.0.1:8912/api/srt/jobs -H 'Content-Type: application/json' \
+  -d '{"dep":"수서","arr":"부산","date":"20260801","time":"080000","pay_mode":"manual"}'
+# 예약 후 결제 진행 / 잡 중지
+curl -s -X POST http://127.0.0.1:8912/api/srt/jobs/j1/pay
+curl -s -X DELETE http://127.0.0.1:8912/api/srt/jobs/j1
+# KTX는 /api/ktx/* 동일 패턴 (train_id, train_type 필드 사용)
+```
+
+관리 명령: 중지 `launchctl bootout gui/$(id -u)/com.chihunlee.k-rail-macro` · 전체 해제 `bash setup_remote.sh --remove` · 로그 `/tmp/k-rail-macro.log`
+
 ## 기존 SRT/KTX 단독 사용자
 
 - Keychain 항목 이름이 같음 (`srt-macro` / `ktx-macro`) → **저장한 자격증명 그대로 마이그레이션됨**
@@ -80,6 +117,7 @@ python server.py
 | `jobstore.py` | 활성 잡 디스크 저장/복원 (서버 재시작 시 자동 재개) |
 | `run_supervised.sh` | macOS 서버 감시 루프 (죽으면 자동 재시작) |
 | `setup_lid_mode.sh` | 뚜껑 닫아도 잡 유지용 1회 설정 (pmset sudoers) |
+| `setup_remote.sh` | 폰 원격용 상주 세팅 (launchd + tailscale serve) |
 | `static/index.html` | 탭 UI, 두 서비스 공통 JS |
 | `install.sh` | 친구용 원클릭 설치 |
 
