@@ -25,6 +25,7 @@ from srtgo.ktx import (
 
 import config
 import jobstore
+import schedule_cache
 import timetable as tt
 from ktx_korail import PatchedKorail
 from recovery import RecoveryController
@@ -726,4 +727,60 @@ def transfer_search(
         "direct": direct,
         "transfers": tt.sort_and_limit(transfers, limit),
         "errors": errors,
+    }
+
+
+# 자주 쓰는 구간(창원↔동대구/오송 환승 구간 + 서울행 대안) — 프리페치 기본값
+PREFETCH_ROUTES = [
+    ("창원중앙", "동대구"), ("동대구", "창원중앙"),
+    ("창원중앙", "오송"), ("오송", "창원중앙"),
+    ("창원중앙", "서울"), ("서울", "창원중앙"),
+]
+
+
+def prefetch_timetables(routes=None, days: int = 30, delay_s: float = 2.5, train_type: str = "all") -> dict:
+    """한달치 시간표를 미리 받아 schedule_cache에 저장한다(백그라운드 실행 전제).
+
+    로그인 1회 재사용 + 검색 사이 delay_s(±지터) 간격, 세션 8분마다 선제 갱신.
+    NoResultsError는 '그 날 열차 없음'으로 빈 목록을 캐시한다.
+    """
+    from datetime import datetime, timedelta
+
+    route_list = [tuple(r) for r in (routes or PREFETCH_ROUTES)]
+    dates = [(datetime.now() + timedelta(days=i)).strftime("%Y%m%d") for i in range(days)]
+    client = _new_search_client()
+    ttype = TRAIN_TYPE_MAP.get(train_type.lower(), TrainType.ALL)
+    session_started = time.monotonic()
+    fetched, err_list = 0, []
+    for dep, arr in route_list:
+        for d in dates:
+            if time.monotonic() - session_started > 480:  # 세션 만료 예방
+                try:
+                    client = _new_search_client()
+                    session_started = time.monotonic()
+                except Exception as e:
+                    err_list.append(f"재로그인 실패: {_safe_err(e)[:60]}")
+                    time.sleep(15)
+                    continue
+            try:
+                trains = client.search_train(dep, arr, d, "000000", train_type=ttype, include_no_seats=True)
+                schedule_cache.put("ktx", dep, arr, d, [_row(t) for t in trains])
+                fetched += 1
+            except NoResultsError:
+                schedule_cache.put("ktx", dep, arr, d, [])
+                fetched += 1
+            except NeedToLoginError:
+                try:
+                    client = _new_search_client()
+                    session_started = time.monotonic()
+                except Exception:
+                    pass
+            except Exception as e:
+                err_list.append(f"{dep}→{arr} {d}: {_safe_err(e)[:60]}")
+                time.sleep(15)  # 차단성 오류일 수 있어 여유를 두고 계속
+            time.sleep(delay_s + random.uniform(0.0, 1.0))
+    return {
+        "service": "ktx", "fetched": fetched, "days": days,
+        "routes": [f"{d}→{a}" for d, a in route_list],
+        "errors": len(err_list), "error_samples": err_list[:10],
     }

@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 import card_test
 import config
+import schedule_cache
 import srt_worker
 import ktx_worker
 
@@ -29,8 +30,9 @@ ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 
 # 버전은 2.x = SRT+KTX 통합 GUI 세대. 2.1.0 중복예매 방지(계정 예약/발권
 # 이력 사전검사 + 활성 잡 이중등록 차단), 2.1.1 결제 기본값 자동(auto),
-# 2.2.0 시간표/환승 조회(구간별 조합, /api/*/timetable·transfer + lookup 폴링).
-VERSION = "2.2.0"
+# 2.2.0 시간표/환승 조회(구간별 조합, /api/*/timetable·transfer + lookup 폴링),
+# 2.3.0 한달치 시간표 프리페치 캐시(/api/*/prefetch + /api/cache/*).
+VERSION = "2.3.0"
 DEVELOPER = "이치헌 (Chihun Lee)"
 APP_NAME = "K-Rail Macro"
 
@@ -190,6 +192,26 @@ def lookup_result(qid: str):
     if entry is None:
         raise HTTPException(status_code=404, detail="query not found (만료됐거나 잘못된 id)")
     return {"query_id": qid, **entry}
+
+
+# ─── 시간표 캐시 (한달치 사전 다운로드) ─────────────────────────────────
+class PrefetchIn(BaseModel):
+    days: int = Field(default=30, ge=1, le=32)
+    routes: Optional[list[list[str]]] = None  # [[dep, arr], ...] 미지정 시 워커 기본 구간
+
+
+@app.get("/api/cache/timetable")
+def cache_timetable(svc: str, dep: str, arr: str, date: str):
+    """캐시된 시간표 조회 (즉시 응답). 좌석 정보는 fetched_at 시점 값."""
+    entry = schedule_cache.get(svc, dep, arr, date)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="캐시 없음 — /api/{svc}/prefetch로 미리 받거나 라이브 조회 사용")
+    return {"svc": svc, "dep": dep, "arr": arr, "date": date, **entry}
+
+
+@app.get("/api/cache/status")
+def cache_status():
+    return schedule_cache.status()
 
 
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
@@ -366,6 +388,12 @@ def srt_transfer(body: TransferIn):
         srt_worker.transfer_search, body.dep, body.arr, body.date, body.time,
         body.vias, body.min_gap_min, body.limit,
     )}
+
+
+@srt_router.post("/prefetch")
+def srt_prefetch(body: PrefetchIn):
+    """한달치 시간표 사전 다운로드 시작(수 분~수십 분) → /api/lookup/{id} 폴링."""
+    return {"query_id": _start_lookup(srt_worker.prefetch_timetables, body.routes, body.days)}
 
 
 @srt_router.post("/search")
@@ -604,6 +632,12 @@ def ktx_transfer(body: KTXTransferIn):
         ktx_worker.transfer_search, body.dep, body.arr, body.date, body.time,
         body.vias, body.min_gap_min, body.limit, body.train_type,
     )}
+
+
+@ktx_router.post("/prefetch")
+def ktx_prefetch(body: PrefetchIn):
+    """한달치 시간표 사전 다운로드 시작(수 분~수십 분) → /api/lookup/{id} 폴링."""
+    return {"query_id": _start_lookup(ktx_worker.prefetch_timetables, body.routes, body.days)}
 
 
 @ktx_router.post("/search")

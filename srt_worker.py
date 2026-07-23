@@ -23,6 +23,7 @@ from SRT.netfunnel import NetFunnelHelper
 
 import config
 import jobstore
+import schedule_cache
 import timetable as tt
 from recovery import RecoveryController
 
@@ -679,6 +680,59 @@ def transfer_search(
         "direct": direct,
         "transfers": tt.sort_and_limit(transfers, limit),
         "errors": errors,
+    }
+
+
+# 자주 쓰는 구간(창원 출퇴근 + 동대구/오송 환승 구간) — 프리페치 기본값
+PREFETCH_ROUTES = [
+    ("창원중앙", "수서"), ("수서", "창원중앙"),
+    ("동대구", "수서"), ("수서", "동대구"),
+    ("오송", "수서"), ("수서", "오송"),
+    ("창원중앙", "동대구"), ("동대구", "창원중앙"),
+]
+
+
+def prefetch_timetables(routes=None, days: int = 30, delay_s: float = 2.5) -> dict:
+    """한달치 시간표를 미리 받아 schedule_cache에 저장한다(백그라운드 실행 전제).
+
+    로그인 1회 재사용 + 검색 사이 delay_s(±지터) 간격으로 안티봇을 피하고,
+    세션은 8분마다 선제 갱신한다. 개별 검색 실패는 건너뛰고 계속한다.
+    """
+    from datetime import datetime, timedelta
+
+    route_list = [tuple(r) for r in (routes or PREFETCH_ROUTES)]
+    dates = [(datetime.now() + timedelta(days=i)).strftime("%Y%m%d") for i in range(days)]
+    srt = _new_search_client()
+    session_started = time.monotonic()
+    fetched, err_list = 0, []
+    for dep, arr in route_list:
+        for d in dates:
+            if time.monotonic() - session_started > 480:  # 세션 만료 예방
+                try:
+                    srt = _new_search_client()
+                    session_started = time.monotonic()
+                except Exception as e:
+                    err_list.append(f"재로그인 실패: {_safe_err(e)[:60]}")
+                    time.sleep(15)
+                    continue
+            try:
+                trains = srt.search_train(dep, arr, d, "000000", available_only=False)
+                schedule_cache.put("srt", dep, arr, d, [_row(t) for t in trains])
+                fetched += 1
+            except SRTNotLoggedInError:
+                try:
+                    srt = _new_search_client()
+                    session_started = time.monotonic()
+                except Exception:
+                    pass
+            except Exception as e:
+                err_list.append(f"{dep}→{arr} {d}: {_safe_err(e)[:60]}")
+                time.sleep(15)  # 차단성 오류일 수 있어 여유를 두고 계속
+            time.sleep(delay_s + random.uniform(0.0, 1.0))
+    return {
+        "service": "srt", "fetched": fetched, "days": days,
+        "routes": [f"{d}→{a}" for d, a in route_list],
+        "errors": len(err_list), "error_samples": err_list[:10],
     }
 
 
