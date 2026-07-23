@@ -60,6 +60,9 @@ class FakeSRT:
             raise ConnectionError("network down")
         return True
 
+    def get_reservations(self, paid_only=False):
+        return []           # 기존 예약 없음 → 중복예매 사전검사 통과
+
     block = False
 
     def search_train(self, *a, **kw):
@@ -95,6 +98,7 @@ def main() -> int:
     srt_worker.HEARTBEAT_STALE = 2.0
     srt_worker.MIN_INTERVAL = 0.05
     srt_worker.MAX_INTERVAL = 0.1
+    srt_worker.DEDUP_RETRY_BASE = 0.01
 
     # ── 1. 로그인 실패 = 무한 재시도 (ERROR로 죽지 않음) ──────────────
     mgr = JobManager()

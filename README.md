@@ -1,5 +1,7 @@
 # K-Rail 매크로 (K-Rail Macro)
 
+**v2.1.0** · 개발자: **이치헌 (Chihun Lee)** — 버전·개발자 정보는 서버 `/api/meta`와 웹 UI 하단에도 표시된다.
+
 **SRT + KTX 통합** 매크로. 한 화면에 두 탭, 동시 실행 가능.
 
 > ⚠ **개인용 한정.** 본인 SRT/코레일 계정·본인 카드로만 사용하세요. 자격증명·카드정보는 **macOS Keychain**에 암호화 저장됩니다. 서버는 `127.0.0.1:8912`에만 바인딩됩니다.
@@ -34,6 +36,10 @@ curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-rail-macro/main/instal
   - 활성 잡을 `~/.k-rail-macro/jobs.json`에 저장 → 서버가 죽어도 재시작 시 자동 복원
   - macOS: 서버 크래시 시 2초 후 자동 재기동(`run_supervised.sh`) + 유휴 절전 방지(`caffeinate`)
   - 수동결제 확인 시간초과(~9분)로 예약이 자동취소되면 → 폴링 자동 재개
+- **중복예매 방지 3중 장치** (v2.1.0):
+  - **계정 이력 사전검사**: 폴링 시작 전(서버 재시작 복원·감시자 재기동 포함) 계정의 예약/발권 내역을 조회해, 같은 날짜·구간 표가 **이미 결제돼 있으면 재예매 없이 종료**(PAID), **미결제 예약이 살아있으면 재예매 대신 그 예약을 이어받아 결제 단계로** 진행한다. 크래시가 예약~결제 사이 어디서 나든 같은 표를 두 번 사지 않는다.
+  - **활성 잡 이중 등록 차단**: 같은 구간·날짜의 활성 잡이 있으면 새 잡 등록을 409로 거부 (특정 열차번호가 서로 다르면 허용).
+  - **서버 이중 실행 방지**: 0.0.0.0(launchd 상주)과 127.0.0.1(앱 실행) 바인딩이 공존해 서버 2개가 각자 잡을 복원·폴링하던 경로 차단 — 기동 전 기존 서버 응답을 확인하고 스스로 종료.
 - **뚜껑 닫아도 계속** (macOS, 선택): `bash setup_lid_mode.sh` 를 한 번 실행하면
   (관리자 비밀번호 1회) 이후 **활성 잡이 도는 동안만** `pmset disablesleep`을 자동으로
   켜서 뚜껑을 닫아도 폴링이 계속된다. 잡이 없으면 자동으로 꺼져 평소 배터리엔 영향 없음.
@@ -84,6 +90,16 @@ curl -s -X DELETE http://127.0.0.1:8912/api/srt/jobs/j1
 ```
 
 관리 명령: 중지 `launchctl bootout gui/$(id -u)/com.chihunlee.k-rail-macro` · 전체 해제 `bash setup_remote.sh --remove` · 로그 `/tmp/k-rail-macro.log`
+
+### 폰 Claude 디스패치로 예매 걸기 (`/krail` 스킬)
+
+폰 Claude 앱에서 **이 맥으로 새 세션을 디스패치**한 뒤 기차정보만 말하면 된다:
+
+```
+/krail 수서→오송 8월1일 08시 이후 SRT
+```
+
+스킬(`~/.claude/skills/krail`)이 서버 확인(죽어있으면 launchd 재기동) → 잡 등록 → 표 잡히면 Claude 앱 푸시 알림 → "결제 진행해" 한마디로 결제까지 처리한다. 전제조건: ① 맥 전원/네트워크 ON (`setup_remote.sh` launchd 상주 + claude-keepawake) ② 폰 Claude 앱 ↔ 이 맥 연결(Claude Code 원격 세션) ③ 결제 확인은 수동(pay_mode=manual)이 기본 — 자동결제를 원하면 "자동결제"라고 명시.
 
 ## 기존 SRT/KTX 단독 사용자
 

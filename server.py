@@ -26,7 +26,14 @@ import ktx_worker
 
 # PyInstaller onefile로 묶이면 정적 파일은 임시 추출 경로(_MEIPASS)에 풀린다.
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
-app = FastAPI(title="K-Rail Macro (SRT + KTX, 개인용)")
+
+# 버전은 2.x = SRT+KTX 통합 GUI 세대. 2.1.0에서 중복예매 방지(계정 예약/발권
+# 이력 사전검사 + 활성 잡 이중등록 차단)가 들어갔다.
+VERSION = "2.1.0"
+DEVELOPER = "이치헌 (Chihun Lee)"
+APP_NAME = "K-Rail Macro"
+
+app = FastAPI(title=f"{APP_NAME} (SRT + KTX, 개인용)", version=VERSION)
 
 # 원격(폰) 접속을 위해 K_RAIL_HOST=0.0.0.0 으로 바인딩하더라도, 계정·카드
 # UI가 회사망/공용망에 노출되지 않도록 허용 대역 밖 접근은 전부 차단한다.
@@ -140,6 +147,11 @@ def _on_startup() -> None:
 @app.get("/")
 def index():
     return FileResponse(ROOT / "static" / "index.html")
+
+
+@app.get("/api/meta")
+def meta():
+    return {"name": APP_NAME, "version": VERSION, "developer": DEVELOPER}
 
 
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
@@ -345,6 +357,12 @@ def srt_jobs_create(body: SRTJobIn):
         train_number=body.train_number, passengers=body.passengers,
         seat_pref=body.seat_pref, pay_mode=srt_worker.PayMode(body.pay_mode),
     )
+    dup = srt_worker.manager.find_active_duplicate(spec)
+    if dup:
+        raise HTTPException(
+            status_code=409,
+            detail=f"같은 구간·날짜의 활성 작업이 이미 있습니다: {dup.id} ({dup.status}) — 중복예매 방지",
+        )
     return _srt_to_dict(srt_worker.manager.create(spec))
 
 
@@ -547,6 +565,12 @@ def ktx_jobs_create(body: KTXJobIn):
         pay_mode=ktx_worker.PayMode(body.pay_mode),
         include_waiting=body.include_waiting,
     )
+    dup = ktx_worker.manager.find_active_duplicate(spec)
+    if dup:
+        raise HTTPException(
+            status_code=409,
+            detail=f"같은 구간·날짜의 활성 작업이 이미 있습니다: {dup.id} ({dup.status}) — 중복예매 방지",
+        )
     return _ktx_to_dict(ktx_worker.manager.create(spec))
 
 
@@ -577,10 +601,31 @@ app.include_router(srt_router)
 app.include_router(ktx_router)
 
 
+def _another_instance_running() -> bool:
+    """이미 K-Rail 서버가 응답 중인지 확인한다(이중 실행 방지).
+
+    0.0.0.0 바인딩(launchd 상주)과 127.0.0.1 바인딩(앱 실행)은 포트 충돌 없이
+    동시에 뜰 수 있다 — 그러면 서버 2개가 각자 jobs.json을 복원해 같은 표를
+    두 번 예매할 수 있다(실제 발생). 그래서 기동 전에 기존 서버 응답을 확인한다.
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+            "http://127.0.0.1:8912/api/srt/config/status", timeout=3
+        ) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
     import os
 
     import uvicorn
+
+    if _another_instance_running():
+        print("[k-rail] 이미 실행 중인 서버 감지(127.0.0.1:8912) → 이중 실행(중복예매 위험) 방지, 종료", flush=True)
+        sys.exit(0)
 
     # 기본은 로컬 전용. 폰(테일넷) 접속용 상주 세팅(setup_remote.sh)이
     # K_RAIL_HOST=0.0.0.0 을 넣어주면 위 미들웨어가 접근 대역을 제한한다.

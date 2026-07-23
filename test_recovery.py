@@ -81,6 +81,9 @@ class FakeSRT:
     def login(self, *a, **k):
         return True
 
+    def get_reservations(self, paid_only=False):
+        return []           # 기존 예약 없음 → 중복예매 사전검사 통과
+
     def search_train(self, *a, **k):
         if FakeSRT.fail_remaining > 0:
             FakeSRT.fail_remaining -= 1
@@ -209,6 +212,12 @@ class FakeKorail:
     def login(self):
         return True
 
+    def tickets(self):
+        return []           # 기존 발권 없음 → 중복예매 사전검사 통과
+
+    def reservations(self, rsv_id=None):
+        return []           # 기존 예약 없음
+
     def search_train(self, *a, **k):
         if FakeKorail.fail_remaining > 0:
             FakeKorail.fail_remaining -= 1
@@ -284,6 +293,155 @@ def test_ktx_survives_nonstring_msg():
     print(f"  [ok] KTX 비문자열 msg 예외 3회 후 생존·회복: successes={FakeKorail.successes}")
 
 
+# ── 2.5 중복예매 방지 (v2.1.0) ─────────────────────────────────────────
+class FakeSRTWithHistory(FakeSRT):
+    """계정에 이미 예약/발권 이력이 있는 상황을 흉내내는 더미."""
+    history = []
+    searched = 0
+    paid_calls = []
+
+    def get_reservations(self, paid_only=False):
+        return list(type(self).history)
+
+    def search_train(self, *a, **k):
+        type(self).searched += 1
+        return []
+
+    def pay_with_card(self, reservation, **kw):
+        type(self).paid_calls.append(reservation)
+        return True
+
+
+def _srt_dedup_setup(history, creds=None):
+    FakeSRTWithHistory.history = history
+    FakeSRTWithHistory.searched = 0
+    FakeSRTWithHistory.paid_calls = []
+    srt_worker.SRT = FakeSRTWithHistory
+    srt_worker.NetFunnelHelper = _FakeNF
+    srt_worker.DEDUP_RETRY_BASE = 0.01
+    srt_worker.MIN_INTERVAL = 0.01
+    srt_worker.MAX_INTERVAL = 0.01
+    srt_worker.config.srt.load = lambda: creds or types.SimpleNamespace(
+        srt_id="tester", srt_password="pw"
+    )
+
+
+def _wait_status(job, statuses, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline and job.status not in statuses:
+        time.sleep(0.05)
+    return job.status
+
+
+def test_srt_dedup_blocks_when_already_paid():
+    """서버 재시작 복원 시나리오: 이미 결제된 표가 있으면 재예매 없이 종료."""
+    _srt_dedup_setup([types.SimpleNamespace(
+        dep_station_name="수서", arr_station_name="부산", dep_date="20260701",
+        train_number="301", paid=True,
+    )])
+    spec = srt_worker.JobSpec(
+        dep="수서", arr="부산", date="20260701", time="090000",
+        train_number=None, passengers=1, seat_pref="any",
+        pay_mode=srt_worker.PayMode.AUTO,
+    )
+    job = srt_worker.manager.create(spec)
+    st = _wait_status(job, (srt_worker.JobStatus.PAID,))
+    srt_worker.manager.stop(job.id)
+    assert st == srt_worker.JobStatus.PAID, f"status={st}"
+    assert FakeSRTWithHistory.searched == 0, "결제된 표가 있는데 검색(재예매 시도)함"
+    assert FakeSRTWithHistory.paid_calls == [], "결제된 표에 또 결제 시도함"
+    assert "[기존 결제 표 감지]" in (job.reservation_summary or "")
+    print("  [ok] 결제완료 표 감지 → 재예매/재결제 없이 즉시 종료(PAID)")
+
+
+def test_srt_dedup_adopts_unpaid_reservation():
+    """크래시가 예약~결제 사이에 난 시나리오: 미결제 예약을 이어받아 결제만 진행."""
+    res = types.SimpleNamespace(
+        dep_station_name="수서", arr_station_name="부산", dep_date="20260701",
+        train_number="301", paid=False, payment_date="20260701", payment_time="235900",
+    )
+    _srt_dedup_setup([res], creds=types.SimpleNamespace(
+        srt_id="tester", srt_password="pw", card_number="1234123412341234",
+        card_password="12", card_validation="900101", card_expire="3012",
+        card_installment=0, card_type="J",
+    ))
+    spec = srt_worker.JobSpec(
+        dep="수서", arr="부산", date="20260701", time="090000",
+        train_number=None, passengers=1, seat_pref="any",
+        pay_mode=srt_worker.PayMode.AUTO,
+    )
+    job = srt_worker.manager.create(spec)
+    st = _wait_status(job, (srt_worker.JobStatus.PAID, srt_worker.JobStatus.ERROR))
+    srt_worker.manager.stop(job.id)
+    assert st == srt_worker.JobStatus.PAID, f"status={st} err={job.error}"
+    assert FakeSRTWithHistory.searched == 0, "예약이 살아있는데 새로 검색(재예매 시도)함"
+    assert FakeSRTWithHistory.paid_calls == [res], "이어받은 예약이 아닌 다른 것을 결제함"
+    print("  [ok] 미결제 예약 이어받기 → 재예매 없이 기존 예약을 결제(PAID)")
+
+
+class FakeKorailWithHistory(FakeKorail):
+    ticket_list = []
+    searched = 0
+
+    def tickets(self):
+        return list(type(self).ticket_list)
+
+    def reservations(self, rsv_id=None):
+        return []
+
+    def search_train(self, *a, **k):
+        type(self).searched += 1
+        return []
+
+
+def test_ktx_dedup_blocks_when_already_ticketed():
+    """KTX: 이미 발권(결제)된 표가 있으면 재예매 없이 종료."""
+    _setup_ktx(FakeKorailWithHistory)
+    ktx_worker.DEDUP_RETRY_BASE = 0.01
+    FakeKorailWithHistory.ticket_list = [types.SimpleNamespace(
+        dep_name="서울", arr_name="부산", dep_date="20260701", train_no="101",
+    )]
+    FakeKorailWithHistory.searched = 0
+    spec = ktx_worker.JobSpec(
+        dep="서울", arr="부산", date="20260701", time="090000",
+        train_id=None, train_type="ktx", passengers=1,
+        seat_pref="any", pay_mode=ktx_worker.PayMode.MANUAL,
+    )
+    job = ktx_worker.manager.create(spec)
+    st = _wait_status(job, (ktx_worker.JobStatus.PAID,))
+    ktx_worker.manager.stop(job.id)
+    assert st == ktx_worker.JobStatus.PAID, f"status={st}"
+    assert FakeKorailWithHistory.searched == 0, "발권된 표가 있는데 검색(재예매 시도)함"
+    print("  [ok] KTX 발권완료 표 감지 → 재예매 없이 즉시 종료(PAID)")
+
+
+def test_find_active_duplicate():
+    """같은 구간·날짜 활성 잡 이중 등록 감지(API 409의 근거)."""
+    _srt_dedup_setup([])  # 이력 없음 → 계속 폴링
+    spec = srt_worker.JobSpec(
+        dep="동탄", arr="목포", date="20261225", time="080000",
+        train_number=None, passengers=1, seat_pref="general",
+        pay_mode=srt_worker.PayMode.MANUAL,
+    )
+    job = srt_worker.manager.create(spec)
+    try:
+        same = srt_worker.JobSpec(
+            dep="동탄", arr="목포", date="20261225", time="100000",
+            train_number=None, passengers=2, seat_pref="any",
+            pay_mode=srt_worker.PayMode.AUTO,
+        )
+        other_day = srt_worker.JobSpec(
+            dep="동탄", arr="목포", date="20261226", time="080000",
+            train_number=None, passengers=1, seat_pref="general",
+            pay_mode=srt_worker.PayMode.MANUAL,
+        )
+        assert srt_worker.manager.find_active_duplicate(same) is job, "같은 구간·날짜인데 중복 미감지"
+        assert srt_worker.manager.find_active_duplicate(other_day) is None, "다른 날짜인데 중복 오탐"
+    finally:
+        srt_worker.manager.stop(job.id)
+    print("  [ok] 활성 잡 이중 등록 감지(같은 구간·날짜=중복, 다른 날짜=허용)")
+
+
 # ── 3. HTTP 타임아웃 강제 (행 방지) ────────────────────────────────────
 def test_force_session_timeout_injects_default():
     captured = {}
@@ -329,4 +487,9 @@ if __name__ == "__main__":
     print("KTX 워커 자가복구 통합:")
     test_ktx_recovers_from_antibot()
     test_ktx_survives_nonstring_msg()
+    print("중복예매 방지(v2.1.0):")
+    test_srt_dedup_blocks_when_already_paid()
+    test_srt_dedup_adopts_unpaid_reservation()
+    test_ktx_dedup_blocks_when_already_ticketed()
+    test_find_active_duplicate()
     print("\nALL PASS ✅")

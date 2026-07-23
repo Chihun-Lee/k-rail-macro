@@ -38,6 +38,8 @@ WATCHDOG_PERIOD = 30.0
 # 최대 정상 sleep(90s) + HTTP 타임아웃(25s) 몇 번을 크게 웃도는 값 — 이보다
 # 오래 심장박동이 없으면 스레드가 되살아날 수 없는 상태로 멈춘 것으로 본다.
 HEARTBEAT_STALE = 480.0
+# 중복예매 사전검사(기존 예약 조회) 실패 시 재시도 간격 배수(초)
+DEDUP_RETRY_BASE = 3.0
 
 
 def _safe_err(e: BaseException) -> str:
@@ -81,6 +83,25 @@ class JobSpec:
     passengers: int
     seat_pref: str  # "general" | "special" | "any"
     pay_mode: PayMode
+
+
+def _spec_matches_reservation(spec: JobSpec, r) -> bool:
+    """SRT 예약/결제 내역이 이 잡과 '같은 표'인지 판정한다(중복예매 방지).
+
+    같은 날짜·같은 구간이면 중복으로 본다. 잡이 특정 열차번호를 지정한 경우엔
+    그 열차와 일치할 때만 중복이다 — 같은 날 다른 열차를 노리는 의도적 추가
+    예매까지 막지는 않는다.
+    """
+    same_route = (
+        getattr(r, "dep_station_name", None) == spec.dep
+        and getattr(r, "arr_station_name", None) == spec.arr
+        and getattr(r, "dep_date", None) == spec.date
+    )
+    if not same_route:
+        return False
+    if spec.train_number:
+        return getattr(r, "train_number", None) == spec.train_number
+    return True
 
 
 @dataclass
@@ -219,6 +240,70 @@ class JobManager:
         job._pay_event.set()
         return True
 
+    def find_active_duplicate(self, spec: JobSpec) -> Optional[Job]:
+        """같은 구간·날짜를 노리는 활성 잡을 찾는다(이중 등록 방지)."""
+        for j in self.list():
+            if j._stop.is_set() or j.status not in (
+                JobStatus.PENDING, JobStatus.POLLING, JobStatus.RESERVED,
+            ):
+                continue
+            s = j.spec
+            if s.dep != spec.dep or s.arr != spec.arr or s.date != spec.date:
+                continue
+            # 두 잡 모두 서로 다른 특정 열차를 지정했으면 중복이 아니다
+            if spec.train_number and s.train_number and spec.train_number != s.train_number:
+                continue
+            return j
+        return None
+
+    def _preflight_dedup(self, srt: SRT, job: Job, creds: config.SRTCredentials) -> Optional[bool]:
+        """폴링 시작 전 SRT 계정의 기존 예약/결제 내역을 확인해 중복예매를 막는다.
+
+        서버 크래시·재시작으로 잡이 복원되거나 감시자가 스레드를 재기동할 때,
+        이전 세션이 이미 잡아둔(심지어 결제까지 끝낸) 표를 모르고 같은 표를
+        또 예매하는 사고를 여기서 차단한다.
+        반환: None=이력 없음(정상 폴링 진행), True=잡 종료, False=폴링 루프 재시작.
+        """
+        reservations = None
+        for attempt in range(3):
+            try:
+                reservations = srt.get_reservations()
+                break
+            except Exception as e:
+                job.log(f"기존 예약 확인 실패({attempt + 1}/3): {_safe_err(e)}")
+                if job._stop.wait(DEDUP_RETRY_BASE * (attempt + 1)):
+                    return None
+        if reservations is None:
+            job.log("⚠ 기존 예약 확인 불가 — 중복 검사 없이 폴링 시작(다음 세션에서 재검사)")
+            return None
+        match = next((r for r in reservations if _spec_matches_reservation(job.spec, r)), None)
+        if match is None:
+            return None
+        if getattr(match, "paid", False):
+            job._reservation = match
+            job.reservation_summary = f"[기존 결제 표 감지] {match}"
+            job.status = JobStatus.PAID
+            job.log(f"이미 결제된 같은 구간 표 발견 → 중복예매 방지, 작업 종료: {match}")
+            return True
+        # 미결제 예약이 살아있음 → 새로 예매하지 않고 그 예약을 이어받아 결제 흐름 재개
+        job._reservation = match
+        job.reservation_summary = f"[기존 예약 이어받음] {match}"
+        job.payment_deadline = (
+            f"{getattr(match, 'payment_date', '?')} {getattr(match, 'payment_time', '')}".strip()
+        )
+        job.status = JobStatus.RESERVED
+        job.log(f"미결제 예약 발견 → 재예매 대신 이어받아 결제 단계로: {match}")
+        if self._handle_payment(srt, job, creds):
+            return True
+        # 결제확인 시간초과 → 예약이 서버측에서 취소됐는지 다시 봐야 하므로
+        # 폴링으로 바로 가지 않고 루프를 재시작해 이 검사를 다시 거친다.
+        job._pay_event.clear()
+        job._reservation = None
+        job.reservation_summary = None
+        job.payment_deadline = None
+        job.status = JobStatus.POLLING
+        return False
+
     def _run(self, job: Job, gen: int) -> None:
         creds = config.srt.load()
         if not creds:
@@ -282,6 +367,11 @@ class JobManager:
 
         job.log(f"login ok ({creds.srt_id}); polling {job.spec.dep}->{job.spec.arr} {job.spec.date} {job.spec.time}")
         job.status = JobStatus.POLLING
+
+        # 중복예매 방지: 이 계정에 같은 표의 예약/결제 이력이 있으면 여기서 끝낸다
+        preflight = self._preflight_dedup(srt, job, creds)
+        if preflight is not None:
+            return preflight
 
         seat_choice = self._seat_pref_to_enum(job.spec.seat_pref)
         # netfunnel 차단은 두 양상이 섞여 있다: ① 대부분은 '일시적 세션 거부'라

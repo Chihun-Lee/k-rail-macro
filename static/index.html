@@ -60,7 +60,7 @@
 </head>
 <body>
 <div id="toast"></div>
-<h1>K-Rail Macro <span class="compact">(개인용 — 본인 PC에서만 접속, 외부 노출 금지)</span></h1>
+<h1>K-Rail Macro <span id="app-version" class="compact"></span> <span class="compact">(개인용 — 본인 PC에서만 접속, 외부 노출 금지)</span></h1>
 <div class="warn">
   ⚠ <strong>본인 SRT/코레일 계정·본인 카드로만 사용해야 합니다.</strong>
   자격증명·카드정보는 <strong id="storage-name">시스템 자격증명 저장소</strong>에 OS 수준으로 암호화 저장됩니다.
@@ -639,6 +639,13 @@ makeService({ svc: "srt", prefix: "/api/srt", idLabel: "SRT ID", hasAlwaysCard: 
   stations: STATIONS_SRT, depDefault: "수서", arrDefault: "오송" });
 makeService({ svc: "ktx", prefix: "/api/ktx", idLabel: "KTX ID", hasAlwaysCard: false,
   stations: STATIONS_KTX, depDefault: "서울", arrDefault: "부산" });
+
+// 버전·개발자 표기 (서버 /api/meta가 단일 진실 원천)
+api("GET", "/api/meta").then(m => {
+  $("app-version").textContent = "v" + m.version;
+  $("app-meta").textContent = `${m.name} v${m.version} · 개발자: ${m.developer} · 개인용 (본인 계정·본인 카드 한정)`;
+}).catch(() => {});
 </script>
+<footer class="compact" id="app-meta" style="margin:24px 0 12px; color:#888;"></footer>
 </body>
 </html>

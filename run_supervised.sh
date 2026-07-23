@@ -14,6 +14,12 @@ cd "$INSTALL_DIR"
 while :; do
   $ARCH_PREFIX "$INSTALL_DIR/venv/bin/python" server.py >> "$LOG" 2>&1
   [ -f "$STOP_FLAG" ] && break
+  # 다른 K-Rail 서버(launchd 상주 등)가 이미 응답하면 — 서버가 이중 실행
+  # 방지로 스스로 종료한 경우 — 되살리지 않고 루프를 끝낸다(중복예매 방지).
+  if curl -fsS -m 3 "http://127.0.0.1:8912/api/srt/config/status" >/dev/null 2>&1; then
+    echo "[$(date '+%F %T')] 다른 K-Rail 서버 실행 중 → 감시 루프 종료(이중 실행 방지)" >> "$LOG"
+    break
+  fi
   echo "[$(date '+%F %T')] 서버 종료 감지 → 2초 후 자동 재시작" >> "$LOG"
   sleep 2
 done
