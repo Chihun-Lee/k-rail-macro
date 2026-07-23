@@ -23,6 +23,7 @@ from SRT.netfunnel import NetFunnelHelper
 
 import config
 import jobstore
+import timetable as tt
 from recovery import RecoveryController
 
 # 정상 폴링 간격(랜덤). 속도제한을 덜 건드리도록 보수적으로 잡는다(안정성 우선 1.5배).
@@ -595,7 +596,7 @@ class JobManager:
 manager = JobManager()
 
 
-def search_preview(dep: str, arr: str, date: str, time_: str) -> list[dict]:
+def _new_search_client() -> SRT:
     creds = config.srt.load()
     if not creds:
         raise RuntimeError("credentials not configured")
@@ -606,6 +607,11 @@ def search_preview(dep: str, arr: str, date: str, time_: str) -> list[dict]:
     if hasattr(srt, "netfunnel_helper") and hasattr(srt.netfunnel_helper, "session"):
         _force_session_timeout(srt.netfunnel_helper.session, 25)
     srt.login()
+    return srt
+
+
+def search_preview(dep: str, arr: str, date: str, time_: str) -> list[dict]:
+    srt = _new_search_client()
     trains = srt.search_train(dep, arr, date, time_, available_only=False)
     out = []
     for t in trains[:25]:
@@ -616,6 +622,64 @@ def search_preview(dep: str, arr: str, date: str, time_: str) -> list[dict]:
             "special": t.special_seat_available(),
         })
     return out
+
+
+def _row(t) -> dict:
+    """시간표/환승 조회용 구조화 행 (timetable.combine 입력 형식)."""
+    return {
+        "train_number": t.train_number,
+        "train_name": t.train_name,
+        "dep": t.dep_station_name,
+        "arr": t.arr_station_name,
+        "dep_time": t.dep_time,
+        "arr_time": t.arr_time,
+        "general": t.general_seat_available(),
+        "special": t.special_seat_available(),
+    }
+
+
+def timetable(dep: str, arr: str, date: str, time_: str = "000000") -> list[dict]:
+    """해당 날짜 직행 시간표 (좌석 유무 포함, 매진 열차도 포함)."""
+    srt = _new_search_client()
+    return [_row(t) for t in srt.search_train(dep, arr, date, time_, available_only=False)]
+
+
+def transfer_search(
+    dep: str, arr: str, date: str, time_: str,
+    vias: list[str], min_gap_min: int = 6, limit: int = 10,
+) -> dict:
+    """직행 + 구간별 환승 조합 조회 (로그인 1회로 전 구간 검색).
+
+    공식 환승 조회가 아니라 구간별 검색을 조합한다 — 각 구간을 별도 잡으로
+    예약하는 '구간별 예약' 방식 전제. 환승 대기 min_gap_min(기본 6분) 이상만.
+    """
+    srt = _new_search_client()
+    errors: list[str] = []
+
+    def rows(d: str, a: str) -> list[dict]:
+        try:
+            return [_row(t) for t in srt.search_train(d, a, date, time_, available_only=False)]
+        except Exception as e:
+            errors.append(f"{d}→{a}: {_safe_err(e)[:80]}")
+            return []
+
+    direct = rows(dep, arr)
+    transfers: list[dict] = []
+    for via in vias:
+        if via in (dep, arr):
+            continue
+        time.sleep(0.5)  # 연속 검색 부하 완화(안티봇)
+        leg1 = rows(dep, via)
+        if not leg1:
+            continue
+        time.sleep(0.5)
+        leg2 = rows(via, arr)
+        transfers.extend(tt.combine(leg1, leg2, via, min_gap_min))
+    return {
+        "direct": direct,
+        "transfers": tt.sort_and_limit(transfers, limit),
+        "errors": errors,
+    }
 
 
 def _force_session_timeout(session, seconds: float) -> None:

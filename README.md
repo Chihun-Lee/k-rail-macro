@@ -1,6 +1,6 @@
 # K-Rail 매크로 (K-Rail Macro)
 
-**v2.1.1** · 개발자: **이치헌 (Chihun Lee)** — 버전·개발자 정보는 서버 `/api/meta`와 웹 UI 하단에도 표시된다.
+**v2.2.0** · 개발자: **이치헌 (Chihun Lee)** — 버전·개발자 정보는 서버 `/api/meta`와 웹 UI 하단에도 표시된다.
 
 **SRT + KTX 통합** 매크로. 한 화면에 두 탭, 동시 실행 가능.
 
@@ -27,6 +27,10 @@ curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-rail-macro/main/instal
 - **하나의 웹앱에 SRT 탭 + KTX 탭** — 둘이 완전히 독립, 동시 실행 가능
 - 폴링 간격: **1~30초 균등 랜덤**
 - 결제 모드: **자동 (즉시 결제, 기본)** / 수동 (사용자 확인) — v2.1.1부터 기본 자동
+- **시간표/환승 조회** (v2.2.0): `POST /api/{srt,ktx}/timetable`(직행) ·
+  `POST /api/{srt,ktx}/transfer`(직행+환승 조합) → `{"query_id"}` 즉시 반환,
+  `GET /api/lookup/{id}` 폴링. 환승은 공식 환승조회가 아니라 **구간별 검색 조합**
+  (환승 대기 6분 이상, via 지정) — 각 구간을 별도 잡으로 예약하는 구간별 예약 방식 전제.
 - anti-bot 자동 회복:
   - SRT NetFunnel "Wrong Server ID" → 캐시 무효화 + 클라이언트 재생성
   - KTX MACRO ERROR → 클라이언트 재생성 (Dynapath 우회 토큰 자동 갱신)

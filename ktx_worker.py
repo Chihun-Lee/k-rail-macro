@@ -25,6 +25,7 @@ from srtgo.ktx import (
 
 import config
 import jobstore
+import timetable as tt
 from ktx_korail import PatchedKorail
 from recovery import RecoveryController
 
@@ -626,7 +627,7 @@ def _force_session_timeout(session, seconds: float) -> None:
     session._kt_timeout_patched = True
 
 
-def search_preview(dep: str, arr: str, date: str, time_: str, train_type: str = "ktx") -> list[dict]:
+def _new_search_client() -> PatchedKorail:
     creds = config.ktx.load()
     if not creds:
         raise RuntimeError("credentials not configured")
@@ -634,9 +635,14 @@ def search_preview(dep: str, arr: str, date: str, time_: str, train_type: str = 
     _force_session_timeout(client._session, 25)
     if not client.login():
         raise RuntimeError("login failed")
-    tt = TRAIN_TYPE_MAP.get(train_type.lower(), TrainType.KTX)
+    return client
+
+
+def search_preview(dep: str, arr: str, date: str, time_: str, train_type: str = "ktx") -> list[dict]:
+    client = _new_search_client()
+    ttype = TRAIN_TYPE_MAP.get(train_type.lower(), TrainType.KTX)
     try:
-        trains = client.search_train(dep, arr, date, time_, train_type=tt, include_no_seats=True)
+        trains = client.search_train(dep, arr, date, time_, train_type=ttype, include_no_seats=True)
     except NoResultsError:
         return []
     out = []
@@ -649,3 +655,75 @@ def search_preview(dep: str, arr: str, date: str, time_: str, train_type: str = 
             "special": t.has_special_seat(),
         })
     return out
+
+
+def _row(t) -> dict:
+    """시간표/환승 조회용 구조화 행 (timetable.combine 입력 형식).
+
+    구간별 예약 잡 등록에 필요한 train_id도 포함한다.
+    """
+    return {
+        "train_number": t.train_no,
+        "train_id": _train_id(t),
+        "train_name": t.train_type_name,
+        "dep": t.dep_name,
+        "arr": t.arr_name,
+        "dep_time": t.dep_time,
+        "arr_time": t.arr_time,
+        "general": t.has_general_seat(),
+        "special": t.has_special_seat(),
+    }
+
+
+def timetable(dep: str, arr: str, date: str, time_: str = "000000", train_type: str = "ktx") -> list[dict]:
+    """해당 날짜 직행 시간표 (좌석 유무 포함, 매진 열차도 포함)."""
+    client = _new_search_client()
+    ttype = TRAIN_TYPE_MAP.get(train_type.lower(), TrainType.KTX)
+    try:
+        trains = client.search_train(dep, arr, date, time_, train_type=ttype, include_no_seats=True)
+    except NoResultsError:
+        return []
+    return [_row(t) for t in trains]
+
+
+def transfer_search(
+    dep: str, arr: str, date: str, time_: str,
+    vias: list[str], min_gap_min: int = 6, limit: int = 10,
+    train_type: str = "ktx",
+) -> dict:
+    """직행 + 구간별 환승 조합 조회 (로그인 1회로 전 구간 검색).
+
+    공식 환승 조회가 아니라 구간별 검색을 조합한다 — 각 구간을 별도 잡으로
+    예약하는 '구간별 예약' 방식 전제. 환승 대기 min_gap_min(기본 6분) 이상만.
+    """
+    client = _new_search_client()
+    ttype = TRAIN_TYPE_MAP.get(train_type.lower(), TrainType.KTX)
+    errors: list[str] = []
+
+    def rows(d: str, a: str) -> list[dict]:
+        try:
+            trains = client.search_train(d, a, date, time_, train_type=ttype, include_no_seats=True)
+        except NoResultsError:
+            return []
+        except Exception as e:
+            errors.append(f"{d}→{a}: {_safe_err(e)[:80]}")
+            return []
+        return [_row(t) for t in trains]
+
+    direct = rows(dep, arr)
+    transfers: list[dict] = []
+    for via in vias:
+        if via in (dep, arr):
+            continue
+        time.sleep(0.5)  # 연속 검색 부하 완화(안티봇)
+        leg1 = rows(dep, via)
+        if not leg1:
+            continue
+        time.sleep(0.5)
+        leg2 = rows(via, arr)
+        transfers.extend(tt.combine(leg1, leg2, via, min_gap_min))
+    return {
+        "direct": direct,
+        "transfers": tt.sort_and_limit(transfers, limit),
+        "errors": errors,
+    }

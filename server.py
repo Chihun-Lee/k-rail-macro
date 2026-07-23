@@ -27,9 +27,10 @@ import ktx_worker
 # PyInstaller onefile로 묶이면 정적 파일은 임시 추출 경로(_MEIPASS)에 풀린다.
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 
-# 버전은 2.x = SRT+KTX 통합 GUI 세대. 2.1.0에서 중복예매 방지(계정 예약/발권
-# 이력 사전검사 + 활성 잡 이중등록 차단), 2.1.1에서 결제 기본값 자동(auto).
-VERSION = "2.1.1"
+# 버전은 2.x = SRT+KTX 통합 GUI 세대. 2.1.0 중복예매 방지(계정 예약/발권
+# 이력 사전검사 + 활성 잡 이중등록 차단), 2.1.1 결제 기본값 자동(auto),
+# 2.2.0 시간표/환승 조회(구간별 조합, /api/*/timetable·transfer + lookup 폴링).
+VERSION = "2.2.0"
 DEVELOPER = "이치헌 (Chihun Lee)"
 APP_NAME = "K-Rail Macro"
 
@@ -154,6 +155,43 @@ def meta():
     return {"name": APP_NAME, "version": VERSION, "developer": DEVELOPER}
 
 
+# ─── 비동기 조회(시간표/환승) 레지스트리 ────────────────────────────────
+# 환승 조회는 로그인 + 구간별 검색 여러 번이라 수 초~수십 초 걸린다. HTTP를
+# 오래 붙잡는 대신 즉시 query_id를 돌려주고 /api/lookup/{id}로 폴링하게 한다.
+import itertools
+import threading as _threading
+
+_lookups: dict[str, dict] = {}
+_lookup_lock = _threading.Lock()
+_lookup_counter = itertools.count(1)
+
+
+def _start_lookup(fn, /, *args, **kw) -> str:
+    with _lookup_lock:
+        qid = f"q{next(_lookup_counter)}"
+        _lookups[qid] = {"status": "running", "result": None, "error": None}
+        # 오래된 결과 정리(최근 20개만 유지)
+        for k in list(_lookups)[:-20]:
+            if _lookups[k]["status"] != "running":
+                _lookups.pop(k, None)
+    def run() -> None:
+        try:
+            r = fn(*args, **kw)
+            _lookups[qid].update(status="done", result=r)
+        except Exception as e:
+            _lookups[qid].update(status="error", error=_safe_err(e))
+    _threading.Thread(target=run, daemon=True, name=f"lookup-{qid}").start()
+    return qid
+
+
+@app.get("/api/lookup/{qid}")
+def lookup_result(qid: str):
+    entry = _lookups.get(qid)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="query not found (만료됐거나 잘못된 id)")
+    return {"query_id": qid, **entry}
+
+
 app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
 
 
@@ -197,6 +235,19 @@ class SRTSearchIn(BaseModel):
     arr: str
     date: str
     time: str
+
+
+class TimetableIn(BaseModel):
+    dep: str
+    arr: str
+    date: str = Field(pattern=r"^\d{8}$")
+    time: str = Field(default="000000", pattern=r"^\d{6}$")
+
+
+class TransferIn(TimetableIn):
+    vias: list[str] = Field(min_length=1, max_length=4)
+    min_gap_min: int = Field(default=6, ge=0, le=120)
+    limit: int = Field(default=10, ge=1, le=30)
 
 
 class SRTJobIn(BaseModel):
@@ -300,6 +351,21 @@ def srt_card_test():
             "steps": [{"name": "error", "ok": False, "detail": detail}],
         }
     return {"ok": r.ok, "summary": r.summary, "steps": r.steps}
+
+
+@srt_router.post("/timetable")
+def srt_timetable(body: TimetableIn):
+    """직행 시간표 비동기 조회 시작 → /api/lookup/{query_id} 폴링."""
+    return {"query_id": _start_lookup(srt_worker.timetable, body.dep, body.arr, body.date, body.time)}
+
+
+@srt_router.post("/transfer")
+def srt_transfer(body: TransferIn):
+    """직행+환승(구간별 조합) 비동기 조회 시작 → /api/lookup/{query_id} 폴링."""
+    return {"query_id": _start_lookup(
+        srt_worker.transfer_search, body.dep, body.arr, body.date, body.time,
+        body.vias, body.min_gap_min, body.limit,
+    )}
 
 
 @srt_router.post("/search")
@@ -513,6 +579,31 @@ def ktx_card_test():
             "steps": [{"name": "error", "ok": False, "detail": detail}],
         }
     return {"ok": r.ok, "summary": r.summary, "steps": r.steps}
+
+
+class KTXTimetableIn(TimetableIn):
+    train_type: str = "ktx"
+
+
+class KTXTransferIn(TransferIn):
+    train_type: str = "ktx"
+
+
+@ktx_router.post("/timetable")
+def ktx_timetable(body: KTXTimetableIn):
+    """직행 시간표 비동기 조회 시작 → /api/lookup/{query_id} 폴링."""
+    return {"query_id": _start_lookup(
+        ktx_worker.timetable, body.dep, body.arr, body.date, body.time, body.train_type,
+    )}
+
+
+@ktx_router.post("/transfer")
+def ktx_transfer(body: KTXTransferIn):
+    """직행+환승(구간별 조합) 비동기 조회 시작 → /api/lookup/{query_id} 폴링."""
+    return {"query_id": _start_lookup(
+        ktx_worker.transfer_search, body.dep, body.arr, body.date, body.time,
+        body.vias, body.min_gap_min, body.limit, body.train_type,
+    )}
 
 
 @ktx_router.post("/search")
