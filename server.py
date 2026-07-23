@@ -28,8 +28,8 @@ import ktx_worker
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 
 # 버전은 2.x = SRT+KTX 통합 GUI 세대. 2.1.0에서 중복예매 방지(계정 예약/발권
-# 이력 사전검사 + 활성 잡 이중등록 차단)가 들어갔다.
-VERSION = "2.1.0"
+# 이력 사전검사 + 활성 잡 이중등록 차단), 2.1.1에서 결제 기본값 자동(auto).
+VERSION = "2.1.1"
 DEVELOPER = "이치헌 (Chihun Lee)"
 APP_NAME = "K-Rail Macro"
 
@@ -207,7 +207,8 @@ class SRTJobIn(BaseModel):
     train_number: Optional[str] = None
     passengers: int = Field(ge=1, le=9, default=1)
     seat_pref: str = Field(default="general", pattern="^(general|special|any)$")
-    pay_mode: str = Field(default="manual", pattern="^(auto|manual)$")
+    # 기본 자동결제 — 카드정보가 Keychain에 저장돼 있어야 한다
+    pay_mode: str = Field(default="auto", pattern="^(auto|manual)$")
 
 
 @srt_router.get("/config/status")
@@ -420,7 +421,8 @@ class KTXJobIn(BaseModel):
     train_type: str = "ktx"
     passengers: int = Field(ge=1, le=9, default=1)
     seat_pref: str = Field(default="general", pattern="^(general|special|any)$")
-    pay_mode: str = Field(default="manual", pattern="^(auto|manual)$")
+    # 기본 자동결제 — 카드정보가 Keychain에 저장돼 있어야 한다
+    pay_mode: str = Field(default="auto", pattern="^(auto|manual)$")
     include_waiting: bool = False
 
 

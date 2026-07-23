@@ -1,6 +1,6 @@
 # K-Rail 매크로 (K-Rail Macro)
 
-**v2.1.0** · 개발자: **이치헌 (Chihun Lee)** — 버전·개발자 정보는 서버 `/api/meta`와 웹 UI 하단에도 표시된다.
+**v2.1.1** · 개발자: **이치헌 (Chihun Lee)** — 버전·개발자 정보는 서버 `/api/meta`와 웹 UI 하단에도 표시된다.
 
 **SRT + KTX 통합** 매크로. 한 화면에 두 탭, 동시 실행 가능.
 
@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/Chihun-Lee/k-rail-macro/main/instal
 
 - **하나의 웹앱에 SRT 탭 + KTX 탭** — 둘이 완전히 독립, 동시 실행 가능
 - 폴링 간격: **1~30초 균등 랜덤**
-- 결제 모드: 수동 (사용자 확인) / 자동 (즉시 결제)
+- 결제 모드: **자동 (즉시 결제, 기본)** / 수동 (사용자 확인) — v2.1.1부터 기본 자동
 - anti-bot 자동 회복:
   - SRT NetFunnel "Wrong Server ID" → 캐시 무효화 + 클라이언트 재생성
   - KTX MACRO ERROR → 클라이언트 재생성 (Dynapath 우회 토큰 자동 갱신)
@@ -99,7 +99,7 @@ curl -s -X DELETE http://127.0.0.1:8912/api/srt/jobs/j1
 /krail 수서→오송 8월1일 08시 이후 SRT
 ```
 
-스킬(`~/.claude/skills/krail`)이 서버 확인(죽어있으면 launchd 재기동) → 잡 등록 → 표 잡히면 Claude 앱 푸시 알림 → "결제 진행해" 한마디로 결제까지 처리한다. 전제조건: ① 맥 전원/네트워크 ON (`setup_remote.sh` launchd 상주 + claude-keepawake) ② 폰 Claude 앱 ↔ 이 맥 연결(Claude Code 원격 세션) ③ 결제 확인은 수동(pay_mode=manual)이 기본 — 자동결제를 원하면 "자동결제"라고 명시.
+스킬(`~/.claude/skills/krail`)이 서버 확인(죽어있으면 launchd 재기동) → 잡 등록 → 표 잡히면 Claude 앱 푸시 알림까지 처리한다. 전제조건: ① 맥 전원/네트워크 ON (`setup_remote.sh` launchd 상주 + claude-keepawake) ② 폰 Claude 앱 ↔ 이 맥 연결(Claude Code 원격 세션) ③ 결제는 자동(pay_mode=auto)이 기본 — 수동 확인을 원하면 "수동결제"라고 명시(그 경우 표 잡힌 뒤 "결제 진행해" 답장으로 결제).
 
 ## 기존 SRT/KTX 단독 사용자
 
