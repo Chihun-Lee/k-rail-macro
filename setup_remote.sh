@@ -62,7 +62,9 @@ cat > "$PLIST" <<EOF
     <key>K_RAIL_HOST</key><string>0.0.0.0</string>
   </dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <!-- 크래시(비정상 종료) 때만 재시작. 이중 실행 가드가 exit 0으로 정상
+       종료하는 경우까지 true로 무한 재스폰하면 5초마다 스팸이 된다. -->
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ThrottleInterval</key><integer>5</integer>
   <key>StandardOutPath</key><string>$LOG</string>
   <key>StandardErrorPath</key><string>$LOG</string>
