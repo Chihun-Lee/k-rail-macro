@@ -60,7 +60,7 @@
 </head>
 <body>
 <div id="toast"></div>
-<h1>K-Rail Macro <span id="app-version" class="compact"></span> <span class="compact">(개인용 — 본인 PC에서만 접속, 외부 노출 금지)</span></h1>
+<h1>K-Rail Macro <span id="app-version" class="compact"></span> <span id="status-badge" style="font-size:14px; font-weight:bold"></span> <span class="compact">(개인용 — 본인 PC에서만 접속, 외부 노출 금지)</span></h1>
 <div class="warn">
   ⚠ <strong>본인 SRT/코레일 계정·본인 카드로만 사용해야 합니다.</strong>
   자격증명·카드정보는 <strong id="storage-name">시스템 자격증명 저장소</strong>에 OS 수준으로 암호화 저장됩니다.
@@ -572,7 +572,20 @@ function makeService(opts) {
   };
 
   async function refreshJobs() {
-    const r = await api("GET", prefix + "/jobs");
+    let r;
+    try {
+      r = await api("GET", prefix + "/jobs", undefined, 8000);
+      svcState[svc].ok = true;
+    } catch (e) {
+      // 서버 끊김 — 상태 아이콘에 반영하고 다음 주기에 재시도
+      svcState[svc].ok = false;
+      svcState[svc].active = 0;
+      updateStatusIcon();
+      return;
+    }
+    svcState[svc].active = r.jobs.filter(
+      j => ["pending", "polling", "reserved"].includes(j.status)).length;
+    updateStatusIcon();
     const area = $(p("-jobs-area"));
     if (r.jobs.length === 0) {
       area.innerHTML = "<p class='compact'>실행 중인 작업이 없습니다.</p>";
@@ -645,6 +658,51 @@ api("GET", "/api/meta").then(m => {
   $("app-version").textContent = "v" + m.version;
   $("app-meta").textContent = `${m.name} v${m.version} · 개발자: ${m.developer} · 개인용 (본인 계정·본인 카드 한정)`;
 }).catch(() => {});
+
+// ─── 세션 상태 아이콘: 파비콘·탭 제목·헤더 배지 ─────────────────────────
+// 초록 = 활성 잡(세션) 폴링 중 · 회색 = 서버 온라인, 잡 없음 · 빨강 = 서버 끊김.
+// refreshJobs(2초 주기)가 svcState를 갱신할 때마다 다시 그린다.
+const svcState = { srt: { ok: null, active: 0 }, ktx: { ok: null, active: 0 } };
+let _lastIconKey = null;
+function updateStatusIcon() {
+  const anyOk = svcState.srt.ok === true || svcState.ktx.ok === true;
+  const active = svcState.srt.active + svcState.ktx.active;
+  const down = !anyOk && (svcState.srt.ok === false || svcState.ktx.ok === false);
+  const color = down ? "#d63031" : (active > 0 ? "#1a7f37" : "#8a8a8a");
+  const key = `${down}|${active}`;
+  if (key === _lastIconKey) return;   // 변화 없으면 다시 그리지 않음
+  _lastIconKey = key;
+
+  const c = document.createElement("canvas");
+  c.width = c.height = 32;
+  const g = c.getContext("2d");
+  g.font = "26px serif";
+  g.fillText("🚄", 0, 26);
+  g.beginPath();
+  g.arc(23, 23, 8, 0, 2 * Math.PI);
+  g.fillStyle = color;
+  g.fill();
+  g.lineWidth = 2;
+  g.strokeStyle = "#fff";
+  g.stroke();
+  let link = document.querySelector("link[rel='icon']");
+  if (!link) {
+    link = document.createElement("link");
+    link.rel = "icon";
+    document.head.appendChild(link);
+  }
+  link.href = c.toDataURL("image/png");
+
+  document.title = down ? "🔴 서버 끊김 — K-Rail Macro"
+    : active > 0 ? `🟢 세션 ON (잡 ${active}건) — K-Rail Macro`
+    : "⚪ 대기 — K-Rail Macro";
+  const badge = $("status-badge");
+  badge.textContent = down ? "● 서버 끊김"
+    : active > 0 ? `● 세션 ON — 활성 잡 ${active}건 폴링 중`
+    : "● 대기 (서버 온라인, 활성 잡 없음)";
+  badge.style.color = color;
+}
+updateStatusIcon();
 </script>
 <footer class="compact" id="app-meta" style="margin:24px 0 12px; color:#888;"></footer>
 </body>
